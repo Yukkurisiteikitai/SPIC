@@ -1,0 +1,509 @@
+/// スライドを RGBA ピクセルバッファにレンダリングする。
+/// fontdue でフォントをラスタライズし、image クレートで PNG にエンコードする。
+use std::path::Path;
+use std::sync::OnceLock;
+
+use image::{ImageBuffer, Rgba};
+
+use crate::app::App;
+use crate::model::BlockKind;
+
+// ──────────────────────────────────────────────────────────────────────────────
+// カラー定義（ui.rs の BG/FG に対応）
+// ──────────────────────────────────────────────────────────────────────────────
+const BG: [u8; 4] = [18, 18, 18, 255];
+const FG_HEADING: [u8; 4] = [224, 224, 224, 255];
+const FG_TEXT: [u8; 4] = [153, 153, 153, 255];
+const FG_CODE: [u8; 4] = [138, 184, 106, 255];
+const FG_EXEC: [u8; 4] = [106, 176, 76, 255];
+const FG_MUTED: [u8; 4] = [85, 85, 85, 255];
+const FG_OUTPUT: [u8; 4] = [170, 210, 170, 255];
+const FG_ACCENT: [u8; 4] = [74, 158, 255, 255];
+const PANEL_BG: [u8; 4] = [24, 24, 24, 255];
+const BORDER: [u8; 4] = [42, 42, 42, 255];
+
+// ──────────────────────────────────────────────────────────────────────────────
+// フォント候補（macOS システムフォント + ユーザーローカル）
+// ──────────────────────────────────────────────────────────────────────────────
+const FONT_CANDIDATES: &[&str] = &[
+    // macOS — Hiragino は ASCII + CJK を全て含む
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    // macOS モノスペース（ASCII fallback）
+    "/System/Library/Fonts/Menlo.ttc",
+    // Linux — Noto Sans CJK
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+];
+
+// フォントバイトを static にキャッシュ（毎フレーム読まない）
+static FONT_DATA: OnceLock<Option<Vec<u8>>> = OnceLock::new();
+
+fn load_font_bytes() -> Option<&'static Vec<u8>> {
+    FONT_DATA.get_or_init(|| {
+        for path in FONT_CANDIDATES {
+            if Path::new(path).exists() {
+                if let Ok(bytes) = std::fs::read(path) {
+                    return Some(bytes);
+                }
+            }
+        }
+        None
+    }).as_ref()
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// スライドを PNG に変換する
+// ──────────────────────────────────────────────────────────────────────────────
+
+pub struct RenderConfig {
+    /// 端末の列数（セル）
+    pub term_cols: u16,
+    /// 端末の行数（セル）
+    pub term_rows: u16,
+    /// セル1つの幅[px]（端末フォント依存；デフォルト 8）
+    pub cell_w: u16,
+    /// セル1つの高さ[px]（端末フォント依存；デフォルト 16）
+    pub cell_h: u16,
+}
+
+impl RenderConfig {
+    pub fn canvas_px(&self) -> (u32, u32) {
+        (
+            self.term_cols as u32 * self.cell_w as u32,
+            self.term_rows as u32 * self.cell_h as u32,
+        )
+    }
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self {
+            term_cols: 120,
+            term_rows: 36,
+            cell_w: 8,
+            cell_h: 16,
+        }
+    }
+}
+
+/// 現在のスライドを PNG バイト列に変換する。
+/// フォントが見つからない場合は `None` を返す（Ratatui フォールバック）。
+pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
+    let font_bytes = load_font_bytes()?;
+
+    let font_size_px = app.presentation.font_size as f32;
+    // 本文フォントサイズ（px）
+    let body_px = (font_size_px * 1.2).max(12.0);
+    // 見出しは本文の 2.0 倍
+    let heading_px = body_px * 2.0;
+
+    // fontdue は TTC の最初のフェイスのみ対応
+    let font = fontdue::Font::from_bytes(
+        font_bytes.as_slice(),
+        fontdue::FontSettings {
+            collection_index: 0,
+            scale: heading_px,
+            load_substitutions: true,
+        },
+    ).ok()?;
+
+    let (canvas_w, canvas_h) = cfg.canvas_px();
+    let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(canvas_w, canvas_h, Rgba(BG));
+
+    let slide = app.current_slide();
+
+    // レイアウト定数 (px)
+    let margin_x = canvas_w as i32 / 10;
+    let mut cursor_y: i32 = canvas_h as i32 / 12;
+    let line_gap_body = (body_px * 0.4) as i32;
+    let line_gap_heading = (heading_px * 0.3) as i32;
+    let block_gap = (body_px * 1.0) as i32;
+
+    let content_w = canvas_w as i32 - margin_x * 2;
+
+    for block in &slide.blocks {
+        if cursor_y > canvas_h as i32 {
+            break;
+        }
+        match &block.kind {
+            BlockKind::Heading { level } => {
+                let px = if *level == 1 { heading_px } else { heading_px * 0.75 };
+                let color = FG_HEADING;
+                let bold = *level == 1;
+                cursor_y += render_text_block(
+                    &mut img, &font, &block.content, margin_x, cursor_y,
+                    content_w, px, color, bold,
+                );
+                if *level == 1 {
+                    // 下線
+                    let underline_y = cursor_y.min(canvas_h as i32 - 1);
+                    draw_hline(&mut img, margin_x, underline_y, content_w, BORDER);
+                    cursor_y += 4;
+                }
+                cursor_y += line_gap_heading;
+            }
+            BlockKind::Text => {
+                cursor_y += render_text_block(
+                    &mut img, &font, &block.content, margin_x + 20, cursor_y,
+                    content_w - 20, body_px, FG_TEXT, false,
+                );
+                cursor_y += line_gap_body;
+            }
+            BlockKind::Code { .. } => {
+                cursor_y += render_panel(
+                    &mut img, &font, &block.content, margin_x, cursor_y,
+                    content_w, body_px * 0.9, FG_CODE, PANEL_BG, BORDER,
+                );
+                cursor_y += line_gap_body;
+            }
+            BlockKind::Exec { signature, .. } => {
+                let border_col = if signature.is_some() { FG_EXEC } else { [255, 107, 107, 255] };
+                let content = format!("$ {}", block.content);
+                cursor_y += render_panel(
+                    &mut img, &font, &content, margin_x, cursor_y,
+                    content_w, body_px * 0.9, FG_CODE, PANEL_BG, border_col,
+                );
+                cursor_y += line_gap_body;
+            }
+            BlockKind::OutputPlaceholder => {
+                let text = if block.content.is_empty() {
+                    "← output will appear here".to_string()
+                } else {
+                    block.content.clone()
+                };
+                cursor_y += render_panel(
+                    &mut img, &font, &text, margin_x, cursor_y,
+                    content_w, body_px * 0.85, FG_OUTPUT, PANEL_BG, BORDER,
+                );
+                cursor_y += line_gap_body;
+            }
+            BlockKind::Separator => {
+                draw_hline(&mut img, margin_x, cursor_y, content_w, BORDER);
+                cursor_y += block_gap;
+            }
+        }
+        cursor_y += block_gap / 2;
+    }
+
+    // フッター（ページ番号）
+    let footer = format!(
+        "{}/{}  font {}px",
+        app.current_slide + 1,
+        app.slide_count(),
+        app.presentation.font_size
+    );
+    render_text_block(
+        &mut img, &font, &footer,
+        margin_x, canvas_h as i32 - body_px as i32 - 8,
+        content_w, body_px * 0.8, FG_MUTED, false,
+    );
+
+    // ヒントライン
+    let hint = "h/l スライド  +/- font  j/k ブロック  Esc 終了";
+    render_text_block(
+        &mut img, &font, hint,
+        margin_x, canvas_h as i32 - body_px as i32 * 2 - 8,
+        content_w, body_px * 0.75, FG_ACCENT, false,
+    );
+
+    // PNG エンコード
+    let mut png_buf: Vec<u8> = Vec::new();
+    {
+        use image::ImageEncoder;
+        image::codecs::png::PngEncoder::new(&mut png_buf)
+            .write_image(img.as_raw(), canvas_w, canvas_h, image::ColorType::Rgba8)
+            .ok()?;
+    }
+
+    Some(png_buf)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ヘルパー
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// テキストブロックをレンダリングし、使用した高さ（px）を返す。
+fn render_text_block(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    font: &fontdue::Font,
+    text: &str,
+    x: i32,
+    y: i32,
+    max_w: i32,
+    font_px: f32,
+    color: [u8; 4],
+    _bold: bool,
+) -> i32 {
+    let line_h = (font_px * 1.4) as i32;
+    let mut pen_y = y;
+    let img_h = img.height() as i32;
+    let img_w = img.width() as i32;
+
+    for raw_line in text.lines() {
+        // 簡易ワードラップ（文字数ベース）
+        let char_w = estimate_char_w(font_px);
+        let max_chars = ((max_w as f32) / char_w).max(1.0) as usize;
+
+        let wrapped = wrap_text(raw_line, max_chars);
+        for line in wrapped {
+            if pen_y + line_h > img_h {
+                break;
+            }
+            draw_text_line(img, font, &line, x, pen_y, font_px, color, img_w, img_h);
+            pen_y += line_h;
+        }
+    }
+    (pen_y - y).max(line_h)
+}
+
+/// パネル（枠付きブロック）をレンダリングし、使用した高さを返す。
+fn render_panel(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    font: &fontdue::Font,
+    text: &str,
+    x: i32,
+    y: i32,
+    max_w: i32,
+    font_px: f32,
+    fg: [u8; 4],
+    bg: [u8; 4],
+    border: [u8; 4],
+) -> i32 {
+    let pad = (font_px * 0.5) as i32;
+    let line_h = (font_px * 1.35) as i32;
+    let char_w = estimate_char_w(font_px);
+    let max_chars = (((max_w - pad * 2) as f32) / char_w).max(1.0) as usize;
+    let img_h = img.height() as i32;
+    let img_w = img.width() as i32;
+
+    // 行数を先に計算
+    let mut all_lines: Vec<String> = Vec::new();
+    for raw in text.lines() {
+        all_lines.extend(wrap_text(raw, max_chars));
+    }
+    if all_lines.is_empty() {
+        all_lines.push(String::new());
+    }
+    let total_h = all_lines.len() as i32 * line_h + pad * 2;
+
+    // 背景塗り
+    fill_rect(img, x, y, max_w, total_h, bg, img_w, img_h);
+    // 枠線（1px）
+    draw_rect_border(img, x, y, max_w, total_h, border, img_w, img_h);
+
+    let mut pen_y = y + pad;
+    for line in &all_lines {
+        draw_text_line(img, font, line, x + pad, pen_y, font_px, fg, img_w, img_h);
+        pen_y += line_h;
+    }
+    total_h
+}
+
+fn draw_text_line(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    font: &fontdue::Font,
+    text: &str,
+    x: i32,
+    pen_y: i32,     // ラインボックスの上端 (Y 増加 = 下方向)
+    font_px: f32,
+    color: [u8; 4],
+    img_w: i32,
+    img_h: i32,
+) {
+    // ベースラインはラインボックス上端からアセンダー分下
+    let baseline_y = pen_y + (font_px * 0.78) as i32;
+    let mut pen_x = x as f32;
+
+    for ch in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, font_px);
+        // fontdue: bitmap row 0 = グリフ上端, ymin = ベースラインからグリフ下端までの符号付き距離
+        // 画像座標 (Y 増加 = 下) での配置:
+        //   グリフ上端の py = baseline_y - (ymin + height)
+        //   row r の py    = グリフ上端 + r
+        let glyph_top = baseline_y - (metrics.ymin as i32 + metrics.height as i32);
+        for row in 0..metrics.height {
+            let py = glyph_top + row as i32;
+            if py < 0 || py >= img_h {
+                continue;
+            }
+            for col in 0..metrics.width {
+                let px_val = bitmap[row * metrics.width + col];
+                if px_val == 0 {
+                    continue;
+                }
+                let px = pen_x as i32 + metrics.xmin as i32 + col as i32;
+                if px < 0 || px >= img_w {
+                    continue;
+                }
+                let alpha = px_val as f32 / 255.0;
+                let bg_px = img.get_pixel(px as u32, py as u32).0;
+                let blended = [
+                    blend(bg_px[0], color[0], alpha),
+                    blend(bg_px[1], color[1], alpha),
+                    blend(bg_px[2], color[2], alpha),
+                    255,
+                ];
+                img.put_pixel(px as u32, py as u32, Rgba(blended));
+            }
+        }
+        pen_x += metrics.advance_width;
+    }
+}
+
+fn blend(bg: u8, fg: u8, alpha: f32) -> u8 {
+    (bg as f32 * (1.0 - alpha) + fg as f32 * alpha).round() as u8
+}
+
+fn draw_hline(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    x: i32, y: i32, w: i32, color: [u8; 4],
+) {
+    let img_w = img.width() as i32;
+    let img_h = img.height() as i32;
+    if y < 0 || y >= img_h {
+        return;
+    }
+    for dx in 0..w {
+        let px = x + dx;
+        if px >= 0 && px < img_w {
+            img.put_pixel(px as u32, y as u32, Rgba(color));
+        }
+    }
+}
+
+fn fill_rect(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    x: i32, y: i32, w: i32, h: i32, color: [u8; 4],
+    img_w: i32, img_h: i32,
+) {
+    for dy in 0..h {
+        let py = y + dy;
+        if py < 0 || py >= img_h {
+            continue;
+        }
+        for dx in 0..w {
+            let px = x + dx;
+            if px >= 0 && px < img_w {
+                img.put_pixel(px as u32, py as u32, Rgba(color));
+            }
+        }
+    }
+}
+
+fn draw_rect_border(
+    img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
+    x: i32, y: i32, w: i32, h: i32, color: [u8; 4],
+    img_w: i32, img_h: i32,
+) {
+    // top / bottom
+    for dx in 0..w {
+        let px = x + dx;
+        if px >= 0 && px < img_w {
+            if y >= 0 && y < img_h {
+                img.put_pixel(px as u32, y as u32, Rgba(color));
+            }
+            let by = y + h - 1;
+            if by >= 0 && by < img_h {
+                img.put_pixel(px as u32, by as u32, Rgba(color));
+            }
+        }
+    }
+    // left / right
+    for dy in 0..h {
+        let py = y + dy;
+        if py >= 0 && py < img_h {
+            if x >= 0 && x < img_w {
+                img.put_pixel(x as u32, py as u32, Rgba(color));
+            }
+            let rx = x + w - 1;
+            if rx >= 0 && rx < img_w {
+                img.put_pixel(rx as u32, py as u32, Rgba(color));
+            }
+        }
+    }
+}
+
+/// 1文字あたりのおおよその幅（等幅近似）
+fn estimate_char_w(font_px: f32) -> f32 {
+    font_px * 0.6
+}
+
+/// 簡易折り返し（最大文字数で切る）
+fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut count = 0;
+    for ch in text.chars() {
+        // CJK は 2カウント
+        let w = if ch.is_ascii() { 1 } else { 2 };
+        if count + w > max_chars && !current.is_empty() {
+            lines.push(current.clone());
+            current.clear();
+            count = 0;
+        }
+        current.push(ch);
+        count += w;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_load_attempt_does_not_panic() {
+        let _ = load_font_bytes();
+    }
+
+    #[test]
+    fn wrap_text_works() {
+        let lines = wrap_text("Hello World", 6);
+        assert!(lines.len() >= 2, "expected wrap, got {:?}", lines);
+    }
+
+    #[test]
+    fn render_slide_to_png_generates_bytes() {
+        use crate::app::{App, AppMode};
+        use crate::model::Presentation;
+        let pres = Presentation::demo();
+        let mut app = App::new(pres);
+        app.presentation.font_size = 20;
+        app.mode = AppMode::Present;
+        let cfg = RenderConfig::default();
+        let result = render_slide_to_png(&app, &cfg);
+        assert!(result.is_some(), "render_slide_to_png returned None (font not found?)");
+        let png = result.unwrap();
+        assert!(png.len() > 1000, "PNG too small: {} bytes", png.len());
+        assert_eq!(&png[..4], b"\x89PNG", "not a valid PNG");
+        eprintln!("PNG generated: {} bytes", png.len());
+    }
+}
+
+#[cfg(test)]
+mod write_png_test {
+    use super::*;
+    use crate::app::{App, AppMode};
+    use crate::model::Presentation;
+
+    #[test]
+    #[ignore]  // cargo test -- --ignored で明示的に実行
+    fn write_png_to_tmp() {
+        let pres = Presentation::demo();
+        let mut app = App::new(pres);
+        app.go_to_slide(1); // 「概要」スライド
+        app.presentation.font_size = 27;
+        app.mode = AppMode::Present;
+        let cfg = RenderConfig { term_cols: 120, term_rows: 36, cell_w: 12, cell_h: 24 };
+        let png = render_slide_to_png(&app, &cfg).expect("render failed");
+        std::fs::write("/tmp/slidecli_preview.png", &png).unwrap();
+        eprintln!("Written to /tmp/slidecli_preview.png ({} bytes)", png.len());
+    }
+}

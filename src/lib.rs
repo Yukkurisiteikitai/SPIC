@@ -3,3 +3,5 @@ pub mod app;
 pub mod ui;
 pub mod input;
 pub mod config;
+pub mod kgp;
+pub mod render;
