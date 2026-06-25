@@ -1,0 +1,161 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::app::{App, AppMode};
+use crate::model::BlockKind;
+
+pub enum Action {
+    None,
+    Quit,
+}
+
+pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
+    match app.mode {
+        AppMode::Normal      => handle_normal(app, key),
+        AppMode::EditingBlock => handle_editing(app, key),
+        AppMode::BlockPicker  => handle_picker(app, key),
+        AppMode::ExecConfirm  => handle_exec_confirm(app, key),
+        AppMode::Present      => handle_present(app, key),
+    }
+}
+
+// ── ノーマルモード（ナビゲーション） ─────────────────────────
+fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('s') => { app.set_status("保存しました（未実装）"); return Action::None; }
+            KeyCode::Char('c') => return Action::Quit,
+            _ => {}
+        }
+    }
+
+    match key.code {
+        KeyCode::Char('q') => return Action::Quit,
+
+        // スライドナビ
+        KeyCode::Char('h') | KeyCode::Left  => app.prev_slide(),
+        KeyCode::Char('l') | KeyCode::Right => app.next_slide(),
+
+        // ブロックナビ
+        KeyCode::Char('k') | KeyCode::Up   => app.prev_block(),
+        KeyCode::Char('j') | KeyCode::Down => app.next_block(),
+
+        // 編集（テキスト・コード・execのコマンド編集）
+        KeyCode::Char('e') | KeyCode::Enter => app.start_edit(),
+
+        // ブロック追加パレット
+        KeyCode::Char('n') => app.mode = AppMode::BlockPicker,
+
+        // ブロック移動
+        KeyCode::Char('K') => app.move_block_up(),
+        KeyCode::Char('J') => app.move_block_down(),
+
+        // スライド追加
+        KeyCode::Char('N') => app.add_slide(),
+
+        // ── exec専用操作 ─────────────────────────────
+        // Space: execブロック実行（署名済みなら確認ダイアログ、未署名なら警告）
+        KeyCode::Char(' ') => app.try_exec_selected(),
+
+        // s: 選択中のexecブロックに署名
+        KeyCode::Char('s') => app.sign_selected(),
+
+        // a: AI審査（未実装・スタブ）
+        KeyCode::Char('a') => {
+            if app.is_exec_selected() {
+                app.set_status("AI審査: 未実装（ANTHROPIC_API_KEY があれば呼び出します）");
+            } else {
+                app.set_status("execブロックを選択してください");
+            }
+        }
+
+        // ── プレゼンモード ────────────────────────────
+        KeyCode::Char('p') => app.enter_present(),
+
+        // 数字キーでスライドジャンプ
+        KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
+            let n = c as usize - '0' as usize;
+            app.go_to_slide(n - 1);
+        }
+
+        KeyCode::Esc => { app.status_message = None; }
+
+        _ => {}
+    }
+    Action::None
+}
+
+// ── テキスト編集モード ────────────────────────────────────────
+fn handle_editing(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc        => app.cancel_edit(),
+        KeyCode::Backspace  => app.delete_char_before(),
+        KeyCode::Left       => app.cursor_left(),
+        KeyCode::Right      => app.cursor_right(),
+        KeyCode::Enter => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.insert_char('\n');
+            } else {
+                app.commit_edit();
+            }
+        }
+        KeyCode::Char(c) if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if c == 'c' { app.cancel_edit(); }
+        }
+        KeyCode::Char(c) => app.insert_char(c),
+        _ => {}
+    }
+    Action::None
+}
+
+// ── ブロック追加パレット ─────────────────────────────────────
+fn handle_picker(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc        => app.mode = AppMode::Normal,
+        KeyCode::Char('1')  => { app.add_block(BlockKind::Heading { level: 1 }); app.start_edit(); }
+        KeyCode::Char('2')  => { app.add_block(BlockKind::Text); app.start_edit(); }
+        KeyCode::Char('3')  => { app.add_block(BlockKind::Code { lang: "rust".into() }); app.start_edit(); }
+        KeyCode::Char('4')  => {
+            app.add_block(BlockKind::Exec { lang: "bash".into(), signature: None });
+            // execブロック追加直後は署名が必要と案内
+            app.set_status("execブロックを追加しました。'e'でコマンド編集、's'で署名してから Space で実行");
+            app.start_edit();
+        }
+        KeyCode::Char('5')  => { app.add_block(BlockKind::OutputPlaceholder); app.mode = AppMode::Normal; }
+        KeyCode::Char('6')  => { app.add_block(BlockKind::Separator); app.mode = AppMode::Normal; }
+        _ => {}
+    }
+    Action::None
+}
+
+// ── exec実行確認ダイアログ ───────────────────────────────────
+fn handle_exec_confirm(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        // y / Enter → 実行
+        KeyCode::Char('y') | KeyCode::Enter => app.run_exec_selected(),
+        // n / Esc → キャンセル
+        KeyCode::Char('n') | KeyCode::Esc => {
+            app.mode = AppMode::Normal;
+            app.set_status("実行をキャンセルしました");
+        }
+        _ => {}
+    }
+    Action::None
+}
+
+// ── プレゼンモード ────────────────────────────────────────────
+fn handle_present(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        // 次スライド
+        KeyCode::Char('l') | KeyCode::Right
+        | KeyCode::Char(' ') | KeyCode::Enter => app.next_slide(),
+
+        // 前スライド
+        KeyCode::Char('h') | KeyCode::Left
+        | KeyCode::Backspace => app.prev_slide(),
+
+        // プレゼン終了
+        KeyCode::Esc | KeyCode::Char('q') => app.exit_present(),
+
+        _ => {}
+    }
+    Action::None
+}

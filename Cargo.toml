@@ -1,0 +1,15 @@
+[package]
+name = "slidecli"
+version = "0.1.0"
+edition = "2021"
+default-run = "slidecli"
+
+[[bin]]
+name = "slidecli"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "=0.24.0"
+crossterm = "=0.26.0"
+serde = { version = "=1.0.193", features = ["derive"] }
+anyhow = "=1.0.75"
