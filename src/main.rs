@@ -1,7 +1,7 @@
-mod model;
 mod app;
-mod ui;
 mod input;
+mod model;
+mod ui;
 
 use std::io;
 use std::time::Duration;
@@ -31,7 +31,11 @@ fn main() -> Result<()> {
     let result = run_app(&mut terminal, &mut app);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     if let Err(e) = result {
@@ -40,19 +44,17 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-) -> Result<()> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         // バックグラウンドのexecから来た出力イベントを取り込む
         app.poll_exec_events();
 
         // モードに応じて描画関数を切り替え
         terminal.draw(|f| match app.mode {
-            AppMode::Present     => ui::draw_present(f, app),
+            AppMode::Present => ui::draw_present(f, app),
+            AppMode::PresentExecConfirm => ui::draw_present_exec_confirm(f, app),
             AppMode::ExecConfirm => ui::draw_exec_confirm(f, app),
-            _                    => ui::draw(f, app),
+            _ => ui::draw(f, app),
         })?;
 
         if event::poll(Duration::from_millis(16))? {

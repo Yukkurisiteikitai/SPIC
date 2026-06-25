@@ -4,15 +4,16 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Instant;
 
-use crate::model::{Presentation, BlockKind, Block};
+use crate::model::{Block, BlockKind, Presentation};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
-    Normal,           // ナビゲーション（ブロック選択・スライド移動）
-    EditingBlock,     // テキスト編集中
-    BlockPicker,      // ブロック追加パレット
-    ExecConfirm,      // exec実行確認オーバーレイ
-    Present,          // プレゼンモード（全画面）
+    Normal,             // ナビゲーション（ブロック選択・スライド移動）
+    EditingBlock,       // テキスト編集中
+    BlockPicker,        // ブロック追加パレット
+    ExecConfirm,        // exec実行確認オーバーレイ
+    PresentExecConfirm, // プレゼン中exec実行確認オーバーレイ
+    Present,            // プレゼンモード（全画面）
 }
 
 pub enum ExecEvent {
@@ -57,11 +58,14 @@ pub struct App {
 
 impl App {
     pub fn new(presentation: Presentation) -> Self {
-        let next_id = presentation.slides.iter()
+        let next_id = presentation
+            .slides
+            .iter()
             .flat_map(|s| s.blocks.iter())
             .map(|b| b.id)
             .max()
-            .unwrap_or(0) + 1;
+            .unwrap_or(0)
+            + 1;
 
         Self {
             presentation,
@@ -90,15 +94,20 @@ impl App {
 
     // 現在選択中のブロック
     pub fn selected_block_ref(&self) -> Option<&crate::model::Block> {
-        self.selected_block.and_then(|i| self.current_slide().blocks.get(i))
+        self.selected_block
+            .and_then(|i| self.current_slide().blocks.get(i))
     }
 
     pub fn is_exec_selected(&self) -> bool {
-        self.selected_block_ref().map(|b| b.is_exec()).unwrap_or(false)
+        self.selected_block_ref()
+            .map(|b| b.is_exec())
+            .unwrap_or(false)
     }
 
     pub fn is_signed_selected(&self) -> bool {
-        self.selected_block_ref().map(|b| b.is_signed()).unwrap_or(false)
+        self.selected_block_ref()
+            .map(|b| b.is_signed())
+            .unwrap_or(false)
     }
 
     // ── ナビゲーション ──────────────────────────────
@@ -129,7 +138,9 @@ impl App {
 
     pub fn prev_block(&mut self) {
         if let Some(sel) = self.selected_block {
-            if sel > 0 { self.selected_block = Some(sel - 1); }
+            if sel > 0 {
+                self.selected_block = Some(sel - 1);
+            }
         }
     }
 
@@ -137,7 +148,7 @@ impl App {
         let len = self.current_slide().blocks.len();
         match self.selected_block {
             Some(sel) if sel + 1 < len => self.selected_block = Some(sel + 1),
-            None if len > 0            => self.selected_block = Some(0),
+            None if len > 0 => self.selected_block = Some(0),
             _ => {}
         }
     }
@@ -160,7 +171,9 @@ impl App {
             let block_id = self.current_slide().blocks[sel].id;
             if let Some(running) = &self.running_exec {
                 if running.block_id == block_id && matches!(running.status, ExecStatus::Running) {
-                    self.set_status("実行中のブロックは編集できません ('c' でキャンセル)".to_string());
+                    self.set_status(
+                        "実行中のブロックは編集できません ('c' でキャンセル)".to_string(),
+                    );
                     self.mode = AppMode::Normal;
                     return;
                 }
@@ -170,7 +183,10 @@ impl App {
             let content_changed = slide.blocks[sel].content != buf;
             // コマンドを変えたらexecブロックの署名をリセット
             if content_changed {
-                if let BlockKind::Exec { ref mut signature, .. } = slide.blocks[sel].kind {
+                if let BlockKind::Exec {
+                    ref mut signature, ..
+                } = slide.blocks[sel].kind
+                {
                     *signature = None;
                 }
             }
@@ -228,7 +244,22 @@ impl App {
                 self.mode = AppMode::ExecConfirm;
             } else {
                 // 未署名 → 署名フローを促す
-                self.set_status("未署名のexecブロックです。's'で署名、'a'でAI審査してください".to_string());
+                self.set_status(
+                    "未署名のexecブロックです。's'で署名、'a'でAI審査してください".to_string(),
+                );
+            }
+        }
+    }
+
+    /// プレゼン中にexecブロックを選択中のとき Space / Enter → 実行確認へ
+    pub fn try_present_exec_selected(&mut self) {
+        if self.is_exec_selected() {
+            if self.is_signed_selected() {
+                self.mode = AppMode::PresentExecConfirm;
+            } else {
+                self.set_status(
+                    "未署名のexecブロックです。's'で署名してから実行してください".to_string(),
+                );
             }
         }
     }
@@ -241,7 +272,10 @@ impl App {
             if is_exec {
                 let content_len = slide.blocks[sel].content.len();
                 let hash = format!("sig:ed25519:mock:{:x}", content_len * 31 + 0xdeadbeef);
-                if let BlockKind::Exec { ref mut signature, .. } = slide.blocks[sel].kind {
+                if let BlockKind::Exec {
+                    ref mut signature, ..
+                } = slide.blocks[sel].kind
+                {
                     *signature = Some(hash);
                 }
                 self.set_status("署名しました（開発用モック署名）".to_string());
@@ -255,7 +289,10 @@ impl App {
     pub fn run_exec_selected(&mut self) {
         let sel = match self.selected_block {
             Some(s) => s,
-            None => { self.mode = AppMode::Normal; return; }
+            None => {
+                self.mode = AppMode::Normal;
+                return;
+            }
         };
         if !self.is_signed_selected() {
             self.set_status("署名されていません。's'で署名してください".to_string());
@@ -278,8 +315,13 @@ impl App {
         let cmd = block.content.clone();
 
         // 直後のOutputPlaceholderを探す（無くてもRunningExec.bufferには蓄積する）
-        let placeholder_idx = self.current_slide().blocks.get(sel + 1)
-            .and_then(|b| if matches!(b.kind, BlockKind::OutputPlaceholder) { Some(sel + 1) } else { None });
+        let placeholder_idx = self.current_slide().blocks.get(sel + 1).and_then(|b| {
+            if matches!(b.kind, BlockKind::OutputPlaceholder) {
+                Some(sel + 1)
+            } else {
+                None
+            }
+        });
 
         // 既存の出力をクリア
         if let Some(idx) = placeholder_idx {
@@ -287,7 +329,8 @@ impl App {
         }
 
         let mut child = match Command::new("sh")
-            .arg("-c").arg(&cmd)
+            .arg("-c")
+            .arg(&cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -309,7 +352,9 @@ impl App {
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
             for line in reader.lines().flatten() {
-                if tx_out.send(ExecEvent::Stdout(line)).is_err() { break; }
+                if tx_out.send(ExecEvent::Stdout(line)).is_err() {
+                    break;
+                }
             }
         });
         // stderr reader thread
@@ -317,7 +362,9 @@ impl App {
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().flatten() {
-                if tx_err.send(ExecEvent::Stderr(line)).is_err() { break; }
+                if tx_err.send(ExecEvent::Stderr(line)).is_err() {
+                    break;
+                }
             }
         });
 
@@ -345,7 +392,9 @@ impl App {
 
     /// 毎フレーム呼ぶ。サブプロセスからの出力イベントをdrainし、状態を更新。
     pub fn poll_exec_events(&mut self) {
-        let Some(running) = self.running_exec.as_mut() else { return };
+        let Some(running) = self.running_exec.as_mut() else {
+            return;
+        };
 
         // チャネルからイベントをdrain
         let mut new_lines: Vec<String> = Vec::new();
@@ -395,7 +444,9 @@ impl App {
             loop {
                 match running.rx.try_recv() {
                     Ok(ExecEvent::Stdout(line)) | Ok(ExecEvent::Stderr(line)) => {
-                        if !running.buffer.is_empty() { running.buffer.push('\n'); }
+                        if !running.buffer.is_empty() {
+                            running.buffer.push('\n');
+                        }
                         running.buffer.push_str(&line);
                     }
                     _ => break,
@@ -426,10 +477,10 @@ impl App {
             running.notified = true;
             let msg = match running.status {
                 ExecStatus::Completed(c) => format!("実行完了 (exit {})", c),
-                ExecStatus::Failed(c)    => format!("実行失敗 (exit {})", c),
-                ExecStatus::Cancelled    => "キャンセルしました".to_string(),
-                ExecStatus::SpawnError   => "実行エラー".to_string(),
-                ExecStatus::Running      => return,
+                ExecStatus::Failed(c) => format!("実行失敗 (exit {})", c),
+                ExecStatus::Cancelled => "キャンセルしました".to_string(),
+                ExecStatus::SpawnError => "実行エラー".to_string(),
+                ExecStatus::Running => return,
             };
             self.set_status(msg);
         }
@@ -441,7 +492,9 @@ impl App {
             self.set_status("実行中のexecはありません".to_string());
             return;
         };
-        if !matches!(running.status, ExecStatus::Running) { return; }
+        if !matches!(running.status, ExecStatus::Running) {
+            return;
+        }
 
         if let Some(child) = running.child.as_mut() {
             let _ = child.kill();
@@ -451,7 +504,9 @@ impl App {
         running.status = ExecStatus::Cancelled;
         running.finished_at = Some(Instant::now());
         running.notified = true;
-        if !running.buffer.is_empty() { running.buffer.push('\n'); }
+        if !running.buffer.is_empty() {
+            running.buffer.push('\n');
+        }
         running.buffer.push_str("[キャンセルされました]");
 
         let slide_idx = running.slide_idx;
@@ -484,14 +539,15 @@ impl App {
         }
     }
 
-
     // ── ブロック追加・削除・移動 ─────────────────────
 
     pub fn add_block(&mut self, kind: BlockKind) {
         let id = self.next_block_id;
         self.next_block_id += 1;
         let block = Block::new(id, kind, "");
-        let insert_pos = self.selected_block.map(|s| s + 1)
+        let insert_pos = self
+            .selected_block
+            .map(|s| s + 1)
             .unwrap_or(self.current_slide().blocks.len());
         self.current_slide_mut().blocks.insert(insert_pos, block);
         self.selected_block = Some(insert_pos);
@@ -528,8 +584,8 @@ impl App {
     // ── プレゼンモード ───────────────────────────────
 
     pub fn enter_present(&mut self) {
+        self.go_to_slide(0);
         self.mode = AppMode::Present;
-        self.current_slide = 0;
     }
 
     pub fn exit_present(&mut self) {
