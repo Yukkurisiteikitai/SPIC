@@ -4,7 +4,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Instant;
 
+use crate::config::{save_settings, settings_path, UiSettings};
 use crate::model::{Block, BlockKind, Presentation};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum AppMode {
@@ -18,7 +20,7 @@ pub enum AppMode {
     Present,            // プレゼンモード（全画面）
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum UiTheme {
     Dark,
     Light,
@@ -52,7 +54,7 @@ impl UiTheme {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum AccentColor {
     Blue,
     Green,
@@ -793,6 +795,7 @@ impl App {
                     );
                 }
                 self.presentation.font_name = value;
+                self.persist_ui_settings();
                 Ok(format!(
                     "font-name を {} にしました",
                     self.presentation.font_name
@@ -803,6 +806,7 @@ impl App {
                     "theme は dark / light / high-contrast から指定してください".to_string()
                 })?;
                 self.ui_theme = theme;
+                self.persist_ui_settings();
                 Ok(format!("theme を {} にしました", self.ui_theme.label()))
             }
             "accent" | "accent-color" => {
@@ -810,6 +814,7 @@ impl App {
                     "accent は blue / green / pink / yellow / red から指定してください".to_string()
                 })?;
                 self.accent_color = accent;
+                self.persist_ui_settings();
                 Ok(format!(
                     "accent を {} にしました",
                     self.accent_color.label()
@@ -821,6 +826,7 @@ impl App {
 
     pub fn set_font_size(&mut self, size: u8) {
         self.presentation.font_size = size.clamp(8, 72);
+        self.persist_ui_settings();
     }
 
     pub fn increase_font_size(&mut self) {
@@ -841,16 +847,19 @@ impl App {
             _ => "JetBrains Mono",
         };
         self.presentation.font_name = next.to_string();
+        self.persist_ui_settings();
         self.set_status(format!("font-name: {}", self.presentation.font_name));
     }
 
     pub fn cycle_theme(&mut self) {
         self.ui_theme = self.ui_theme.next();
+        self.persist_ui_settings();
         self.set_status(format!("theme: {}", self.ui_theme.label()));
     }
 
     pub fn cycle_accent(&mut self) {
         self.accent_color = self.accent_color.next();
+        self.persist_ui_settings();
         self.set_status(format!("accent: {}", self.accent_color.label()));
     }
 
@@ -866,5 +875,12 @@ impl App {
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some(msg.into());
+    }
+
+    fn persist_ui_settings(&mut self) {
+        let path = settings_path();
+        if let Err(err) = save_settings(&path, &UiSettings::from_app(self)) {
+            self.set_status(format!("設定保存に失敗: {}", err));
+        }
     }
 }

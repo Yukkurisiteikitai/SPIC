@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod input;
 mod model;
 mod ui;
@@ -15,6 +16,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use app::{App, AppMode};
+use config::{load_settings, settings_path};
 use input::{handle_key, Action};
 use model::Presentation;
 
@@ -27,6 +29,11 @@ fn main() -> Result<()> {
 
     let pres = Presentation::demo();
     let mut app = App::new(pres);
+    match load_settings(&settings_path()) {
+        Ok(Some(settings)) => settings.apply_to_app(&mut app),
+        Ok(None) => {}
+        Err(err) => app.set_status(format!("設定読込に失敗: {}", err)),
+    }
 
     let result = run_app(&mut terminal, &mut app);
 

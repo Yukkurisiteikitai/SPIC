@@ -290,6 +290,8 @@ fn handle_present(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('c') => app.cancel_running_exec(),
         KeyCode::Char('[') | KeyCode::PageUp => app.scroll_output_up(),
         KeyCode::Char(']') | KeyCode::PageDown => app.scroll_output_down(),
+        KeyCode::Char('+') | KeyCode::Char('=') => app.increase_font_size(),
+        KeyCode::Char('-') => app.decrease_font_size(),
         KeyCode::Char(':') => app.start_command(),
 
         // プレゼン終了

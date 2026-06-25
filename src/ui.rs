@@ -249,7 +249,7 @@ fn draw_blocks(f: &mut Frame<'_>, app: &App, area: Rect) {
     let slide = app.current_slide();
     let mut y = area.y;
     let canvas_h = area.height;
-    let zoom = font_zoom(app);
+    let zoom = editor_font_zoom();
 
     for (i, block) in slide.blocks.iter().enumerate() {
         if y >= area.y + area.height {
@@ -352,7 +352,7 @@ fn draw_single_block(
     content: &str,
     area: Rect,
 ) {
-    let zoom = font_zoom(app);
+    let zoom = editor_font_zoom();
     // この OutputPlaceholder が走行中execの出力先か
     let running_for_this = matches!(block.kind, BlockKind::OutputPlaceholder)
         && app
@@ -854,6 +854,10 @@ pub fn draw_settings(f: &mut Frame<'_>, app: &App) {
             bg,
             accent,
         ),
+        Line::from(vec![Span::styled(
+            " font-size はプレゼン表示の密度に反映。編集画面は固定レイアウトです。",
+            Style::default().fg(muted).bg(bg),
+        )]),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Commands",
@@ -978,12 +982,148 @@ fn command_buffer_with_cursor(app: &App) -> String {
 }
 
 // ── ユーティリティ ───────────────────────────────────────────────
-fn font_zoom(app: &App) -> u16 {
-    match app.presentation.font_size {
-        0..=16 => 1,
-        17..=32 => 2,
-        _ => 3,
+fn editor_font_zoom() -> u16 {
+    1
+}
+
+/// font_size を見出し描画のスケール倍率に変換。
+/// 8〜11→1x, 12〜15→2x, 16〜19→3x, 20〜23→4x, 以降4刻みで増える（上限 6）。
+/// 見出しビットマップは 5行×4列を 1x とし、N倍で N*5 行 × N*4 列。
+fn present_font_zoom(app: &App) -> u16 {
+    let size = app.presentation.font_size as u16;
+    (size.saturating_sub(4) / 4).clamp(1, 6)
+}
+
+const GLYPH_W: usize = 4;
+const GLYPH_H: usize = 5;
+
+/// 5行×4列のドットビットマップ。bit 3 (MSB) = 左端, bit 0 = 右端。
+/// 描画可能な文字のみ Some を返す。未対応文字は None で「描画不能」を示し、
+/// 呼び出し側で日本語フォールバックへ切り替える。
+fn glyph_5x4(ch: char) -> Option<[u8; GLYPH_H]> {
+    let upper = ch.to_ascii_uppercase();
+    Some(match upper {
+        'A' => [0b0110, 0b1001, 0b1111, 0b1001, 0b1001],
+        'B' => [0b1110, 0b1001, 0b1110, 0b1001, 0b1110],
+        'C' => [0b0111, 0b1000, 0b1000, 0b1000, 0b0111],
+        'D' => [0b1110, 0b1001, 0b1001, 0b1001, 0b1110],
+        'E' => [0b1111, 0b1000, 0b1110, 0b1000, 0b1111],
+        'F' => [0b1111, 0b1000, 0b1110, 0b1000, 0b1000],
+        'G' => [0b0111, 0b1000, 0b1011, 0b1001, 0b0111],
+        'H' => [0b1001, 0b1001, 0b1111, 0b1001, 0b1001],
+        'I' => [0b1110, 0b0100, 0b0100, 0b0100, 0b1110],
+        'J' => [0b0111, 0b0010, 0b0010, 0b1010, 0b0100],
+        'K' => [0b1001, 0b1010, 0b1100, 0b1010, 0b1001],
+        'L' => [0b1000, 0b1000, 0b1000, 0b1000, 0b1111],
+        'M' => [0b1001, 0b1111, 0b1111, 0b1001, 0b1001],
+        'N' => [0b1001, 0b1101, 0b1111, 0b1011, 0b1001],
+        'O' => [0b0110, 0b1001, 0b1001, 0b1001, 0b0110],
+        'P' => [0b1110, 0b1001, 0b1110, 0b1000, 0b1000],
+        'Q' => [0b0110, 0b1001, 0b1001, 0b1011, 0b0111],
+        'R' => [0b1110, 0b1001, 0b1110, 0b1010, 0b1001],
+        'S' => [0b0111, 0b1000, 0b0110, 0b0001, 0b1110],
+        'T' => [0b1111, 0b0100, 0b0100, 0b0100, 0b0100],
+        'U' => [0b1001, 0b1001, 0b1001, 0b1001, 0b0110],
+        'V' => [0b1001, 0b1001, 0b1001, 0b0110, 0b0110],
+        'W' => [0b1001, 0b1001, 0b1111, 0b1111, 0b1001],
+        'X' => [0b1001, 0b0110, 0b0110, 0b0110, 0b1001],
+        'Y' => [0b1001, 0b1001, 0b0110, 0b0100, 0b0100],
+        'Z' => [0b1111, 0b0010, 0b0100, 0b1000, 0b1111],
+        '0' => [0b0110, 0b1011, 0b1101, 0b1001, 0b0110],
+        '1' => [0b0100, 0b1100, 0b0100, 0b0100, 0b1110],
+        '2' => [0b1110, 0b0001, 0b0110, 0b1000, 0b1111],
+        '3' => [0b1110, 0b0001, 0b0110, 0b0001, 0b1110],
+        '4' => [0b1010, 0b1010, 0b1111, 0b0010, 0b0010],
+        '5' => [0b1111, 0b1000, 0b1110, 0b0001, 0b1110],
+        '6' => [0b0110, 0b1000, 0b1110, 0b1001, 0b0110],
+        '7' => [0b1111, 0b0001, 0b0010, 0b0100, 0b0100],
+        '8' => [0b0110, 0b1001, 0b0110, 0b1001, 0b0110],
+        '9' => [0b0110, 0b1001, 0b0111, 0b0001, 0b0110],
+        ' ' => [0; GLYPH_H],
+        '.' => [0, 0, 0, 0, 0b0010],
+        ',' => [0, 0, 0, 0b0010, 0b0100],
+        '-' => [0, 0, 0b1110, 0, 0],
+        '_' => [0, 0, 0, 0, 0b1111],
+        '!' => [0b0100, 0b0100, 0b0100, 0, 0b0100],
+        '?' => [0b1110, 0b0001, 0b0110, 0, 0b0100],
+        ':' => [0, 0b0100, 0, 0b0100, 0],
+        ';' => [0, 0b0010, 0, 0b0010, 0b0100],
+        '/' => [0b0001, 0b0010, 0b0100, 0b1000, 0b1000],
+        '(' => [0b0010, 0b0100, 0b0100, 0b0100, 0b0010],
+        ')' => [0b0100, 0b0010, 0b0010, 0b0010, 0b0100],
+        '\'' => [0b0100, 0b0100, 0, 0, 0],
+        '"' => [0b1010, 0b1010, 0, 0, 0],
+        _ => return None,
+    })
+}
+
+/// 与えた content をビットマップ大文字で描画可能か判定。
+fn renderable_as_bigtext(content: &str) -> bool {
+    !content.is_empty() && content.chars().all(|c| glyph_5x4(c).is_some())
+}
+
+/// content を bigtext として Vec<Line> に描画する。caller は renderable_as_bigtext で
+/// 事前判定済みである前提（未対応文字は空グリフとして潰す）。
+fn render_bigtext_lines(content: &str, zoom: u16, style: Style) -> Vec<Line<'static>> {
+    let zoom = zoom.max(1) as usize;
+    if content.is_empty() {
+        return Vec::new();
     }
+
+    let total_rows = GLYPH_H * zoom;
+    let mut rows: Vec<String> = vec![String::new(); total_rows];
+
+    for (char_idx, ch) in content.chars().enumerate() {
+        if char_idx > 0 {
+            // 文字間スペース zoom 個ぶん（描画なし）
+            for row in rows.iter_mut() {
+                for _ in 0..zoom {
+                    row.push(' ');
+                }
+            }
+        }
+        let glyph = glyph_5x4(ch).unwrap_or([0; GLYPH_H]);
+        for (g_row, &bits) in glyph.iter().enumerate() {
+            for col_idx in 0..GLYPH_W {
+                // bit 3 = 左端, bit 0 = 右端
+                let bit_pos = GLYPH_W - 1 - col_idx;
+                let on = (bits >> bit_pos) & 1 == 1;
+                let cell = if on { '█' } else { ' ' };
+                for r in 0..zoom {
+                    let target = &mut rows[g_row * zoom + r];
+                    for _ in 0..zoom {
+                        target.push(cell);
+                    }
+                }
+            }
+        }
+    }
+
+    rows.into_iter()
+        .map(|s| Line::from(vec![Span::styled(s, style)]))
+        .collect()
+}
+
+/// content を bigtext で描いたときの「行高さ」「最大幅」を返す（オーバーフロー判定用）。
+fn bigtext_dims(content: &str, zoom: u16) -> (u16, u16) {
+    let zoom = zoom.max(1) as u16;
+    let chars = content.chars().count() as u16;
+    if chars == 0 {
+        return (0, 0);
+    }
+    let height = GLYPH_H as u16 * zoom;
+    let width = chars * GLYPH_W as u16 * zoom + chars.saturating_sub(1) * zoom;
+    (width, height)
+}
+
+fn wrapped_line_count(content: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let mut count = 0usize;
+    for line in content.lines() {
+        let len = display_width(line).max(1);
+        count += (len + width - 1) / width;
+    }
+    count.max(1) as u16
 }
 
 fn zoomed_line_count(lines: u16, zoom: u16) -> u16 {
@@ -1094,43 +1234,15 @@ impl PresentTypography {
 }
 
 fn present_typography(app: &App, area: Rect) -> PresentTypography {
+    // 演者が選んだ font_size を尊重し、内容のはみ出しでスケールを下げない。
+    // font_size に応じてレイアウトの余白だけ切り替える。
     let has_status = app.status_message.is_some();
-    let text_weight = present_slide_text_weight(app);
-    let scales = if app.presentation.font_size >= 18 {
-        [
-            PresentTextScale::Relaxed,
-            PresentTextScale::Balanced,
-            PresentTextScale::Compact,
-        ]
-    } else if app.presentation.font_size <= 12 {
-        [
-            PresentTextScale::Compact,
-            PresentTextScale::Balanced,
-            PresentTextScale::Relaxed,
-        ]
-    } else {
-        [
-            PresentTextScale::Balanced,
-            PresentTextScale::Relaxed,
-            PresentTextScale::Compact,
-        ]
+    let scale = match app.presentation.font_size {
+        0..=12 => PresentTextScale::Compact,
+        13..=20 => PresentTextScale::Balanced,
+        _ => PresentTextScale::Relaxed,
     };
-
-    for scale in scales {
-        let typography = PresentTypography::new(scale, area, has_status);
-        let content_area = present_content_area(area, typography);
-        let needed = present_slide_height(app, content_area.width, typography);
-        let density_limit = match scale {
-            PresentTextScale::Relaxed => content_area.width as usize * 3,
-            PresentTextScale::Balanced => content_area.width as usize * 7,
-            PresentTextScale::Compact => usize::MAX,
-        };
-        if needed <= content_area.height && text_weight <= density_limit {
-            return typography;
-        }
-    }
-
-    PresentTypography::new(PresentTextScale::Compact, area, has_status)
+    PresentTypography::new(scale, area, has_status)
 }
 
 fn present_content_area(area: Rect, typography: PresentTypography) -> Rect {
@@ -1145,28 +1257,6 @@ fn present_content_area(area: Rect, typography: PresentTypography) -> Rect {
     }
 }
 
-fn present_slide_height(app: &App, width: u16, typography: PresentTypography) -> u16 {
-    let slide = app.current_slide();
-    let mut height = 0u16;
-
-    for (idx, block) in slide.blocks.iter().enumerate() {
-        if idx > 0 {
-            height = height.saturating_add(typography.block_gap);
-        }
-        height = height.saturating_add(present_block_height(app, block, idx, width, typography));
-    }
-
-    height
-}
-
-fn present_slide_text_weight(app: &App) -> usize {
-    app.current_slide()
-        .blocks
-        .iter()
-        .map(|block| display_width(&block.content))
-        .sum()
-}
-
 fn display_width(content: &str) -> usize {
     content
         .chars()
@@ -1174,26 +1264,8 @@ fn display_width(content: &str) -> usize {
         .sum()
 }
 
-fn wrapped_line_count(content: &str, width: u16) -> u16 {
-    let width = width.max(1) as usize;
-    let mut count = 0usize;
-
-    for line in content.lines() {
-        let len = display_width(line).max(1);
-        count += (len + width - 1) / width;
-    }
-
-    count.max(1) as u16
-}
-
 fn spaces(width: u16) -> String {
     " ".repeat(width as usize)
-}
-
-fn push_zoom_gap(lines: &mut Vec<Line<'static>>, zoom: u16) {
-    for _ in 0..zoom.saturating_sub(1) {
-        lines.push(Line::from(""));
-    }
 }
 
 // ── プレゼンモード（全画面）────────────────────────────────────
@@ -1250,11 +1322,17 @@ fn present_block_height(
     width: u16,
     typography: PresentTypography,
 ) -> u16 {
-    let zoom = font_zoom(app);
+    let zoom = present_font_zoom(app);
     match &block.kind {
         BlockKind::Heading { level } => {
             let content_width = width.saturating_sub(typography.body_indent + 2).max(1);
-            let lines = zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom);
+            let lines = if renderable_as_bigtext(&block.content) {
+                // bigtext は 1行に対して GLYPH_H*zoom 行ぶんを消費
+                bigtext_dims(&block.content, zoom).1
+            } else {
+                // 日本語フォールバック: 行数 × zoom（縦リピート）
+                wrapped_line_count(&block.content, content_width).saturating_mul(zoom)
+            };
             let underline = if typography.scale == PresentTextScale::Relaxed && *level == 1 {
                 1
             } else {
@@ -1273,24 +1351,19 @@ fn present_block_height(
             } else {
                 0
             };
-            zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom) + extra
+            wrapped_line_count(&block.content, content_width) + extra
         }
         BlockKind::Code { .. } => {
             let content_width = width.saturating_sub(4).max(1);
-            (zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom) + 2)
-                .min(typography.code_max_lines * zoom)
+            (wrapped_line_count(&block.content, content_width) + 2).min(typography.code_max_lines)
         }
         BlockKind::Exec { .. } => {
             let content_width = width.saturating_sub(6).max(1);
-            (zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom) + 2)
-                .min(typography.exec_max_lines * zoom)
+            (wrapped_line_count(&block.content, content_width) + 2).min(typography.exec_max_lines)
         }
         BlockKind::OutputPlaceholder => {
             let max_lines = present_output_max_lines(app, idx, typography);
-            zoomed_line_count(
-                present_output_lines(app, idx, block, max_lines).len() as u16,
-                zoom,
-            ) + 2
+            (present_output_lines(app, idx, block, max_lines).len() as u16) + 2
         }
         BlockKind::Separator => 1,
     }
@@ -1305,7 +1378,8 @@ fn draw_present_block(
     area: Rect,
     typography: PresentTypography,
 ) {
-    let zoom = font_zoom(app);
+    let zoom = present_font_zoom(app);
+
     match &block.kind {
         BlockKind::Heading { level } => {
             let marker = if is_selected { "▸ " } else { "  " };
@@ -1325,25 +1399,41 @@ fn draw_present_block(
                     .bg(BG_PRESENT)
                     .add_modifier(Modifier::BOLD)
             };
-            let mut lines: Vec<Line> = Vec::new();
-            for (line_idx, line) in block.content.lines().enumerate() {
-                lines.push({
-                    let prefix = if line_idx == 0 { marker } else { "  " };
-                    Line::from(vec![Span::styled(
-                        format!("{}{}{}", indent, prefix, line),
-                        style,
-                    )])
-                });
-                push_zoom_gap(&mut lines, zoom);
+
+            let mut lines: Vec<Line<'static>> = Vec::new();
+
+            if renderable_as_bigtext(&block.content) {
+                // ASCII 見出し: ビットマップフォントで実際に大きく描画
+                let big_lines = render_bigtext_lines(&block.content, zoom, style);
+                let prefix = format!("{}{}", indent, marker);
+                let pad = spaces(prefix.chars().count() as u16);
+                for (i, line) in big_lines.into_iter().enumerate() {
+                    let lead = if i == 0 { prefix.clone() } else { pad.clone() };
+                    let mut spans = vec![Span::styled(lead, style)];
+                    spans.extend(line.spans);
+                    lines.push(Line::from(spans));
+                }
+            } else {
+                // 日本語など: 同じ行を zoom 回繰り返し、BOLD で強調（縦のみ）
+                let zoom_usize = zoom.max(1) as usize;
+                let src_lines: Vec<String> = if block.content.is_empty() {
+                    vec![String::new()]
+                } else {
+                    block.content.lines().map(|s| s.to_string()).collect()
+                };
+                for (line_idx, line) in src_lines.iter().enumerate() {
+                    for row in 0..zoom_usize {
+                        let prefix = if line_idx == 0 && row == 0 { marker } else { "  " };
+                        lines.push(Line::from(vec![Span::styled(
+                            format!("{}{}{}", indent, prefix, line),
+                            style,
+                        )]));
+                    }
+                }
             }
-            if lines.is_empty() {
-                lines.push(Line::from(vec![Span::styled(
-                    format!("{}{}", indent, marker),
-                    style,
-                )]));
-            }
+
             if typography.scale == PresentTextScale::Relaxed && *level == 1 {
-                let underline_width = block.content.chars().count().clamp(12, 48);
+                let underline_width = display_width(&block.content).clamp(12, 48);
                 lines.push(Line::from(vec![Span::styled(
                     format!("  {}", "─".repeat(underline_width)),
                     Style::default().fg(BORDER_DIM).bg(BG_PRESENT),
@@ -1376,7 +1466,6 @@ fn draw_present_block(
                         Style::default().fg(FG_SECONDARY).bg(BG_PRESENT),
                     ),
                 ]));
-                push_zoom_gap(&mut lines, zoom);
             }
             if lines.is_empty() {
                 let marker = if is_selected { "▸ " } else { "  " };
@@ -1397,7 +1486,8 @@ fn draw_present_block(
             );
         }
         BlockKind::Code { lang } => {
-            let lines: Vec<Line> = zoomed_text(&block.content, zoom)
+            let lines: Vec<Line> = block
+                .content
                 .lines()
                 .map(|line| {
                     Line::from(vec![Span::styled(
@@ -1446,7 +1536,6 @@ fn draw_present_block(
                         Style::default().fg(FG_CODE).bg(BG_PRESENT_PANEL),
                     ),
                 ]));
-                push_zoom_gap(&mut lines, zoom);
             }
             if lines.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
@@ -1470,12 +1559,11 @@ fn draw_present_block(
         BlockKind::OutputPlaceholder => {
             let max_lines = present_output_max_lines(app, idx, typography);
             let output_lines = present_output_lines(app, idx, block, max_lines);
-            let output_text = zoomed_text(&output_lines.join("\n"), zoom);
-            let lines: Vec<Line> = output_text
-                .lines()
+            let lines: Vec<Line> = output_lines
+                .into_iter()
                 .map(|line| {
                     Line::from(vec![Span::styled(
-                        line.to_string(),
+                        line,
                         Style::default()
                             .fg(Color::Rgb(170, 210, 170))
                             .bg(BG_PRESENT_PANEL),
@@ -1661,7 +1749,10 @@ fn draw_present_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
         page_area,
     );
 
-    let hint = " j/k 選択  Space/Enter 実行/次  h/l 前後  c キャンセル  Esc 終了";
+    let hint = format!(
+        " j/k 選択  Space/Enter 実行/次  h/l 前後  +/- font {}  c キャンセル  Esc 終了",
+        app.presentation.font_size
+    );
     let hint_width = area.width.saturating_sub(page_area.width + 1);
     let hint_area = Rect {
         x: area.x,
@@ -1670,7 +1761,7 @@ fn draw_present_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
         height: 1,
     };
     f.render_widget(
-        Paragraph::new(truncate(hint, hint_width as usize))
+        Paragraph::new(truncate(&hint, hint_width as usize))
             .style(Style::default().fg(Color::Rgb(78, 78, 78)).bg(BG_PRESENT)),
         hint_area,
     );
@@ -1756,5 +1847,101 @@ fn draw_exec_confirm_popup(f: &mut Frame<'_>, app: &App, title: &str) {
             Paragraph::new(text).style(Style::default().bg(Color::Rgb(18, 28, 18))),
             inner,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    use crate::{app::App, model::Presentation};
+
+    fn render_editor(app: &App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        let mut rendered = String::new();
+        let max_y = buf.area.height.saturating_sub(1);
+        for y in 0..max_y {
+            for x in 0..buf.area.width {
+                rendered.push_str(&buf.get(x, y).symbol);
+            }
+            rendered.push('\n');
+        }
+        rendered
+    }
+
+    #[test]
+    fn editor_layout_is_stable_across_font_sizes() {
+        let pres = Presentation::demo();
+        let mut small = App::new(pres.clone());
+        small.go_to_slide(1);
+        small.presentation.font_size = 8;
+
+        let mut large = App::new(pres);
+        large.go_to_slide(1);
+        large.presentation.font_size = 20;
+
+        assert_eq!(render_editor(&small), render_editor(&large));
+    }
+
+    fn count_present_glyph_cells(app: &App) -> usize {
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| draw_present(f, app)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut count = 0;
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let sym = &buf.get(x, y).symbol;
+                if sym != " " && sym != "" {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    fn ascii_heading_app(font_size: u8) -> App {
+        use crate::model::{Block, BlockKind, Slide};
+        let mut pres = Presentation::demo();
+        pres.font_size = font_size;
+        pres.slides.clear();
+        let mut slide = Slide::new("TITLE");
+        slide
+            .blocks
+            .push(Block::new(1, BlockKind::Heading { level: 1 }, "HELLO"));
+        slide.blocks.push(Block::new(2, BlockKind::Text, "body"));
+        pres.slides.push(slide);
+        let mut app = App::new(pres);
+        app.mode = crate::app::AppMode::Present;
+        app
+    }
+
+    #[test]
+    fn present_ascii_heading_grows_with_font_size() {
+        let small = ascii_heading_app(10);
+        let large = ascii_heading_app(28);
+
+        let small_cells = count_present_glyph_cells(&small);
+        let large_cells = count_present_glyph_cells(&large);
+        assert!(
+            large_cells >= small_cells * 5,
+            "expected ASCII heading at font_size 28 to render 5x more glyph cells than at 10, \
+             got small={} large={}",
+            small_cells,
+            large_cells
+        );
+    }
+
+    #[test]
+    fn present_japanese_heading_does_not_panic() {
+        let pres = Presentation::demo();
+        let mut app = App::new(pres);
+        app.go_to_slide(1); // 「概要」 (pure Japanese heading)
+        app.presentation.font_size = 28;
+        app.mode = crate::app::AppMode::Present;
+        let _ = count_present_glyph_cells(&app);
     }
 }
