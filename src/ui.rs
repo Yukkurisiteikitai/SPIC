@@ -712,6 +712,10 @@ fn draw_block_picker(f: &mut Frame<'_>, _app: &App, area: Rect) {
 
 // ── ユーティリティ ───────────────────────────────────────────────
 fn truncate(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
     let chars: Vec<char> = s.chars().collect();
     if chars.len() <= max_chars {
         s.to_string()
@@ -720,6 +724,154 @@ fn truncate(s: &str, max_chars: usize) -> String {
         result.push('…');
         result
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PresentTextScale {
+    Relaxed,
+    Balanced,
+    Compact,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PresentTypography {
+    scale: PresentTextScale,
+    content_width: u16,
+    top_margin: u16,
+    bottom_reserved: u16,
+    block_gap: u16,
+    heading_gap: u16,
+    body_indent: u16,
+    code_max_lines: u16,
+    exec_max_lines: u16,
+    output_max_lines: usize,
+    running_output_max_lines: usize,
+}
+
+impl PresentTypography {
+    fn new(scale: PresentTextScale, area: Rect, has_status: bool) -> Self {
+        let bottom_reserved = if has_status { 4 } else { 3 };
+        let (
+            side_margin,
+            max_width,
+            top_margin,
+            block_gap,
+            heading_gap,
+            body_indent,
+            code_max_lines,
+            exec_max_lines,
+            output_max_lines,
+            running_output_max_lines,
+        ) = match scale {
+            PresentTextScale::Relaxed => (10, 92, 4, 2, 2, 6, 10, 8, 10, 12),
+            PresentTextScale::Balanced => (6, 104, 3, 1, 1, 4, 9, 8, 8, 10),
+            PresentTextScale::Compact => (2, 118, 1, 0, 0, 2, 6, 5, 5, 7),
+        };
+
+        let min_width = area.width.saturating_sub(2).min(28);
+        let content_width = area
+            .width
+            .saturating_sub(side_margin * 2)
+            .min(max_width)
+            .max(min_width);
+
+        Self {
+            scale,
+            content_width,
+            top_margin: top_margin.min(area.height.saturating_sub(1)),
+            bottom_reserved,
+            block_gap,
+            heading_gap,
+            body_indent,
+            code_max_lines,
+            exec_max_lines,
+            output_max_lines,
+            running_output_max_lines,
+        }
+    }
+}
+
+fn present_typography(app: &App, area: Rect) -> PresentTypography {
+    let has_status = app.status_message.is_some();
+    let text_weight = present_slide_text_weight(app);
+    let scales = [
+        PresentTextScale::Relaxed,
+        PresentTextScale::Balanced,
+        PresentTextScale::Compact,
+    ];
+
+    for scale in scales {
+        let typography = PresentTypography::new(scale, area, has_status);
+        let content_area = present_content_area(area, typography);
+        let needed = present_slide_height(app, content_area.width, typography);
+        let density_limit = match scale {
+            PresentTextScale::Relaxed => content_area.width as usize * 3,
+            PresentTextScale::Balanced => content_area.width as usize * 7,
+            PresentTextScale::Compact => usize::MAX,
+        };
+        if needed <= content_area.height && text_weight <= density_limit {
+            return typography;
+        }
+    }
+
+    PresentTypography::new(PresentTextScale::Compact, area, has_status)
+}
+
+fn present_content_area(area: Rect, typography: PresentTypography) -> Rect {
+    let width = typography.content_width.min(area.width);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + typography.top_margin,
+        width,
+        height: area
+            .height
+            .saturating_sub(typography.top_margin + typography.bottom_reserved),
+    }
+}
+
+fn present_slide_height(app: &App, width: u16, typography: PresentTypography) -> u16 {
+    let slide = app.current_slide();
+    let mut height = 0u16;
+
+    for (idx, block) in slide.blocks.iter().enumerate() {
+        if idx > 0 {
+            height = height.saturating_add(typography.block_gap);
+        }
+        height = height.saturating_add(present_block_height(app, block, idx, width, typography));
+    }
+
+    height
+}
+
+fn present_slide_text_weight(app: &App) -> usize {
+    app.current_slide()
+        .blocks
+        .iter()
+        .map(|block| display_width(&block.content))
+        .sum()
+}
+
+fn display_width(content: &str) -> usize {
+    content
+        .chars()
+        .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+        .sum()
+}
+
+fn wrapped_line_count(content: &str, width: u16) -> u16 {
+    let width = width.max(1) as usize;
+    let mut count = 0usize;
+
+    for line in content.lines() {
+        let len = display_width(line).max(1);
+        count += (len + width - 1) / width;
+    }
+
+    count.max(1) as u16
+}
+
+fn spaces(width: u16) -> String {
+    " ".repeat(width as usize)
 }
 
 // ── プレゼンモード（全画面）────────────────────────────────────
@@ -735,17 +887,8 @@ pub fn draw_present(f: &mut Frame<'_>, app: &App) {
         return;
     }
 
-    let min_w = area.width.saturating_sub(2).min(28);
-    let content_w = area.width.saturating_sub(8).min(112).max(min_w);
-    let content_x = area.x + area.width.saturating_sub(content_w) / 2;
-    let top_margin = if area.height >= 24 { 3 } else { 1 };
-    let bottom_reserved = if app.status_message.is_some() { 4 } else { 3 };
-    let content_area = Rect {
-        x: content_x,
-        y: area.y + top_margin,
-        width: content_w,
-        height: area.height.saturating_sub(top_margin + bottom_reserved),
-    };
+    let typography = present_typography(app, area);
+    let content_area = present_content_area(area, typography);
 
     let slide = app.current_slide();
     let mut y = content_area.y;
@@ -757,7 +900,8 @@ pub fn draw_present(f: &mut Frame<'_>, app: &App) {
         }
 
         let remaining = content_bottom.saturating_sub(y);
-        let height = present_block_height(app, block, idx).min(remaining);
+        let height =
+            present_block_height(app, block, idx, content_area.width, typography).min(remaining);
         if height == 0 {
             break;
         }
@@ -769,29 +913,55 @@ pub fn draw_present(f: &mut Frame<'_>, app: &App) {
             height,
         };
         let is_selected = app.selected_block == Some(idx);
-        draw_present_block(f, app, block, idx, is_selected, block_area);
-        y = y.saturating_add(height + 1);
+        draw_present_block(f, app, block, idx, is_selected, block_area, typography);
+        y = y.saturating_add(height + typography.block_gap);
     }
 
     draw_present_status(f, app, area);
     draw_present_footer(f, app, area);
 }
 
-fn present_block_height(app: &App, block: &crate::model::Block, idx: usize) -> u16 {
+fn present_block_height(
+    app: &App,
+    block: &crate::model::Block,
+    idx: usize,
+    width: u16,
+    typography: PresentTypography,
+) -> u16 {
     match &block.kind {
         BlockKind::Heading { level } => {
-            let lines = block.content.lines().count().max(1) as u16;
-            if *level == 1 {
-                lines + 2
+            let content_width = width.saturating_sub(typography.body_indent + 2).max(1);
+            let lines = wrapped_line_count(&block.content, content_width);
+            let underline = if typography.scale == PresentTextScale::Relaxed && *level == 1 {
+                1
             } else {
-                lines + 1
+                0
+            };
+            if *level == 1 {
+                lines + typography.heading_gap + underline
+            } else {
+                lines + typography.heading_gap
             }
         }
-        BlockKind::Text => block.content.lines().count().max(1) as u16 + 1,
-        BlockKind::Code { .. } => (block.content.lines().count().max(1) as u16 + 2).min(9),
-        BlockKind::Exec { .. } => (block.content.lines().count().max(1) as u16 + 2).min(8),
+        BlockKind::Text => {
+            let content_width = width.saturating_sub(typography.body_indent + 2).max(1);
+            let extra = if typography.scale == PresentTextScale::Relaxed {
+                1
+            } else {
+                0
+            };
+            wrapped_line_count(&block.content, content_width) + extra
+        }
+        BlockKind::Code { .. } => {
+            let content_width = width.saturating_sub(4).max(1);
+            (wrapped_line_count(&block.content, content_width) + 2).min(typography.code_max_lines)
+        }
+        BlockKind::Exec { .. } => {
+            let content_width = width.saturating_sub(6).max(1);
+            (wrapped_line_count(&block.content, content_width) + 2).min(typography.exec_max_lines)
+        }
         BlockKind::OutputPlaceholder => {
-            let max_lines = present_output_max_lines(app, idx);
+            let max_lines = present_output_max_lines(app, idx, typography);
             present_output_lines(app, idx, block, max_lines).len() as u16 + 2
         }
         BlockKind::Separator => 1,
@@ -805,10 +975,16 @@ fn draw_present_block(
     idx: usize,
     is_selected: bool,
     area: Rect,
+    typography: PresentTypography,
 ) {
     match &block.kind {
         BlockKind::Heading { level } => {
             let marker = if is_selected { "▸ " } else { "  " };
+            let indent = if *level == 1 {
+                String::new()
+            } else {
+                spaces(typography.body_indent / 2)
+            };
             let style = if *level == 1 {
                 Style::default()
                     .fg(FG_PRIMARY)
@@ -826,11 +1002,27 @@ fn draw_present_block(
                 .enumerate()
                 .map(|(line_idx, line)| {
                     let prefix = if line_idx == 0 { marker } else { "  " };
-                    Line::from(vec![Span::styled(format!("{}{}", prefix, line), style)])
+                    Line::from(vec![Span::styled(
+                        format!("{}{}{}", indent, prefix, line),
+                        style,
+                    )])
                 })
                 .collect();
             if lines.is_empty() {
-                lines.push(Line::from(vec![Span::styled(marker, style)]));
+                lines.push(Line::from(vec![Span::styled(
+                    format!("{}{}", indent, marker),
+                    style,
+                )]));
+            }
+            if typography.scale == PresentTextScale::Relaxed && *level == 1 {
+                let underline_width = block.content.chars().count().clamp(12, 48);
+                lines.push(Line::from(vec![Span::styled(
+                    format!("  {}", "─".repeat(underline_width)),
+                    Style::default().fg(BORDER_DIM).bg(BG_PRESENT),
+                )]));
+            }
+            for _ in 0..typography.heading_gap {
+                lines.push(Line::from(""));
             }
             f.render_widget(
                 Paragraph::new(Text::from(lines))
@@ -841,6 +1033,7 @@ fn draw_present_block(
         }
         BlockKind::Text => {
             let mut lines: Vec<Line> = Vec::new();
+            let indent = spaces(typography.body_indent);
             for (line_idx, line) in block.content.lines().enumerate() {
                 let marker = if is_selected && line_idx == 0 {
                     "▸ "
@@ -848,6 +1041,7 @@ fn draw_present_block(
                     "  "
                 };
                 lines.push(Line::from(vec![
+                    Span::raw(indent.clone()),
                     Span::styled(marker, Style::default().fg(FG_ACCENT).bg(BG_PRESENT)),
                     Span::styled(
                         line.to_string(),
@@ -858,9 +1052,13 @@ fn draw_present_block(
             if lines.is_empty() {
                 let marker = if is_selected { "▸ " } else { "  " };
                 lines.push(Line::from(vec![
+                    Span::raw(indent),
                     Span::styled(marker, Style::default().fg(FG_ACCENT).bg(BG_PRESENT)),
                     Span::styled(" ", Style::default().fg(FG_SECONDARY).bg(BG_PRESENT)),
                 ]));
+            }
+            if typography.scale == PresentTextScale::Relaxed {
+                lines.push(Line::from(""));
             }
             f.render_widget(
                 Paragraph::new(Text::from(lines))
@@ -941,7 +1139,7 @@ fn draw_present_block(
             render_present_panel(f, area, title, border, Text::from(lines), FG_CODE);
         }
         BlockKind::OutputPlaceholder => {
-            let max_lines = present_output_max_lines(app, idx);
+            let max_lines = present_output_max_lines(app, idx, typography);
             let output_lines = present_output_lines(app, idx, block, max_lines);
             let lines: Vec<Line> = output_lines
                 .into_iter()
@@ -1004,11 +1202,11 @@ fn render_present_panel(
     );
 }
 
-fn present_output_max_lines(app: &App, idx: usize) -> usize {
+fn present_output_max_lines(app: &App, idx: usize, typography: PresentTypography) -> usize {
     if is_running_output(app, idx) {
-        12
+        typography.running_output_max_lines
     } else {
-        10
+        typography.output_max_lines
     }
 }
 

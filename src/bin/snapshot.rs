@@ -46,4 +46,13 @@ fn main() {
     app.mode = AppMode::PresentExecConfirm;
     let mut t4 = Terminal::new(TestBackend::new(100, 30)).unwrap();
     render(&mut t4, &app, draw_present_exec_confirm);
+
+    println!("\n=== プレゼンモード（長文自動フィット）===");
+    app.go_to_slide(1);
+    app.current_slide_mut().blocks[1].content =
+        "• Markdown互換の内部ブロックモデルを保ちながら、編集時はブロック単位で扱う\n• execブロックは署名済みでも必ず実行確認を通し、発表中も同じ安全規則を維持する\n• 出力プレースホルダは長い実行結果を必要な分だけ表示し、スライド全体の比率を崩さない\n• 画面サイズと本文量に応じて余白・幅・行間・出力行数を自動調節する"
+            .to_string();
+    app.mode = AppMode::Present;
+    let mut t5 = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    render(&mut t5, &app, draw_present);
 }
