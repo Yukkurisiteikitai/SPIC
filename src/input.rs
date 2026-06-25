@@ -191,16 +191,10 @@ fn handle_exec_confirm(app: &mut App, key: KeyEvent) -> Action {
 // ── プレゼン中exec実行確認ダイアログ ─────────────────────────────
 fn handle_present_exec_confirm(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
-        // y / Enter → 実行してプレゼンへ戻る
-        KeyCode::Char('y') | KeyCode::Enter => {
-            app.run_exec_selected();
-            app.mode = AppMode::Present;
-        }
+        // y / Enter → 実行してプレゼンへ戻る（popup 閉鎖後の背景欠けを防ぐため needs_redraw も立てる）
+        KeyCode::Char('y') | KeyCode::Enter => app.confirm_present_exec_run(),
         // n / Esc → キャンセルしてプレゼンへ戻る
-        KeyCode::Char('n') | KeyCode::Esc => {
-            app.mode = AppMode::Present;
-            app.set_status("実行をキャンセルしました");
-        }
+        KeyCode::Char('n') | KeyCode::Esc => app.cancel_present_exec_dialog(),
         _ => {}
     }
     Action::None

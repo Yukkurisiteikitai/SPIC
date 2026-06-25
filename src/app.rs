@@ -6,6 +6,7 @@ use std::time::Instant;
 
 use crate::config::{save_settings, settings_path, UiSettings};
 use crate::model::{Block, BlockKind, Presentation};
+use crate::present::PresentState;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -140,6 +141,8 @@ pub struct App {
     pub running_exec: Option<RunningExec>,
     pub ui_theme: UiTheme,
     pub accent_color: AccentColor,
+    /// プレゼンモードの派生状態（dirty flag, fingerprint キャッシュ）
+    pub present: PresentState,
 }
 
 impl App {
@@ -169,6 +172,7 @@ impl App {
             running_exec: None,
             ui_theme: UiTheme::Dark,
             accent_color: AccentColor::Blue,
+            present: PresentState::new(),
         }
     }
 
@@ -483,6 +487,7 @@ impl App {
     }
 
     /// 毎フレーム呼ぶ。サブプロセスからの出力イベントをdrainし、状態を更新。
+    /// 新規出力や終了イベントを取り込んだ場合は `present.needs_redraw` を立てる。
     pub fn poll_exec_events(&mut self) {
         let Some(running) = self.running_exec.as_mut() else {
             return;
@@ -499,6 +504,7 @@ impl App {
             }
         }
 
+        let got_new_lines = !new_lines.is_empty();
         for line in &new_lines {
             if !running.buffer.is_empty() {
                 running.buffer.push('\n');
@@ -575,6 +581,12 @@ impl App {
                 ExecStatus::Running => return,
             };
             self.set_status(msg);
+            self.present.needs_redraw = true;
+        }
+
+        // 新規出力があればプレゼン画面を更新
+        if got_new_lines {
+            self.present.needs_redraw = true;
         }
     }
 
@@ -678,10 +690,28 @@ impl App {
     pub fn enter_present(&mut self) {
         self.go_to_slide(0);
         self.mode = AppMode::Present;
+        self.present.reset();
     }
 
     pub fn exit_present(&mut self) {
         self.mode = AppMode::Normal;
+        self.present.reset();
+    }
+
+    /// プレゼン中の exec 実行確認ダイアログで「y」が押されたとき。
+    /// 実行を開始し、プレゼンモードに戻り、KGP 画像の再送信を強制する。
+    pub fn confirm_present_exec_run(&mut self) {
+        self.run_exec_selected();
+        self.mode = AppMode::Present;
+        self.present.request_redraw();
+    }
+
+    /// プレゼン中の exec 実行確認ダイアログで「n / Esc」が押されたとき。
+    /// プレゼンモードに戻り、popup の下にあった KGP 画像を再送信する。
+    pub fn cancel_present_exec_dialog(&mut self) {
+        self.mode = AppMode::Present;
+        self.set_status("実行をキャンセルしました");
+        self.present.request_redraw();
     }
 
     // ── 設定・コマンド ───────────────────────────────

@@ -1,12 +1,14 @@
 /// スライドを RGBA ピクセルバッファにレンダリングする。
 /// fontdue でフォントをラスタライズし、image クレートで PNG にエンコードする。
-use std::path::Path;
-use std::sync::OnceLock;
-
+///
+/// フォント / グリフ / キャンバスのキャッシュは [`crate::present::cache`] に集約されており、
+/// [`render_slide_to_png_with_caches`] に注入される。
+/// [`render_slide_to_png`] は後方互換のための薄いラッパ（毎回ローカルキャッシュを生成）。
 use image::{ImageBuffer, Rgba};
 
 use crate::app::App;
 use crate::model::BlockKind;
+use crate::present::cache::{font as cached_font, CanvasPool, GlyphCache};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // カラー定義（ui.rs の BG/FG に対応）
@@ -21,35 +23,6 @@ const FG_OUTPUT: [u8; 4] = [170, 210, 170, 255];
 const FG_ACCENT: [u8; 4] = [74, 158, 255, 255];
 const PANEL_BG: [u8; 4] = [24, 24, 24, 255];
 const BORDER: [u8; 4] = [42, 42, 42, 255];
-
-// ──────────────────────────────────────────────────────────────────────────────
-// フォント候補（macOS システムフォント + ユーザーローカル）
-// ──────────────────────────────────────────────────────────────────────────────
-const FONT_CANDIDATES: &[&str] = &[
-    // macOS — Hiragino は ASCII + CJK を全て含む
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    // macOS モノスペース（ASCII fallback）
-    "/System/Library/Fonts/Menlo.ttc",
-    // Linux — Noto Sans CJK
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-];
-
-// フォントバイトを static にキャッシュ（毎フレーム読まない）
-static FONT_DATA: OnceLock<Option<Vec<u8>>> = OnceLock::new();
-
-fn load_font_bytes() -> Option<&'static Vec<u8>> {
-    FONT_DATA.get_or_init(|| {
-        for path in FONT_CANDIDATES {
-            if Path::new(path).exists() {
-                if let Ok(bytes) = std::fs::read(path) {
-                    return Some(bytes);
-                }
-            }
-        }
-        None
-    }).as_ref()
-}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // スライドを PNG に変換する
@@ -86,34 +59,35 @@ impl Default for RenderConfig {
     }
 }
 
-/// 現在のスライドを PNG バイト列に変換する。
-/// フォントが見つからない場合は `None` を返す（Ratatui フォールバック）。
+/// 後方互換ラッパ。内部でローカルキャッシュを生成して呼び出す。
+/// パフォーマンスが必要な場合は [`render_slide_to_png_with_caches`] を使うこと。
+#[allow(dead_code)]
 pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
-    let font_bytes = load_font_bytes()?;
+    let mut glyphs = GlyphCache::default();
+    let mut canvas = CanvasPool::new();
+    render_slide_to_png_with_caches(app, cfg, &mut glyphs, &mut canvas)
+}
+
+/// 現在のスライドを PNG バイト列に変換する（キャッシュ注入版）。
+/// フォントが見つからない場合は `None` を返す（Ratatui フォールバック）。
+pub fn render_slide_to_png_with_caches(
+    app: &App,
+    cfg: &RenderConfig,
+    glyphs: &mut GlyphCache,
+    canvas: &mut CanvasPool,
+) -> Option<Vec<u8>> {
+    let font = cached_font()?;
 
     let font_size_px = app.presentation.font_size as f32;
-    // 本文フォントサイズ（px）
     let body_px = (font_size_px * 1.2).max(12.0);
-    // 見出しは本文の 2.0 倍
     let heading_px = body_px * 2.0;
 
-    // fontdue は TTC の最初のフェイスのみ対応
-    let font = fontdue::Font::from_bytes(
-        font_bytes.as_slice(),
-        fontdue::FontSettings {
-            collection_index: 0,
-            scale: heading_px,
-            load_substitutions: true,
-        },
-    ).ok()?;
-
     let (canvas_w, canvas_h) = cfg.canvas_px();
-    let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> =
-        ImageBuffer::from_pixel(canvas_w, canvas_h, Rgba(BG));
+    let buf = canvas.take(canvas_w, canvas_h, BG);
+    let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_raw(canvas_w, canvas_h, buf)?;
 
     let slide = app.current_slide();
 
-    // レイアウト定数 (px)
     let margin_x = canvas_w as i32 / 10;
     let mut cursor_y: i32 = canvas_h as i32 / 12;
     let line_gap_body = (body_px * 0.4) as i32;
@@ -132,11 +106,10 @@ pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
                 let color = FG_HEADING;
                 let bold = *level == 1;
                 cursor_y += render_text_block(
-                    &mut img, &font, &block.content, margin_x, cursor_y,
-                    content_w, px, color, bold,
+                    &mut img, font, glyphs, &block.content, margin_x, cursor_y, content_w, px,
+                    color, bold,
                 );
                 if *level == 1 {
-                    // 下線
                     let underline_y = cursor_y.min(canvas_h as i32 - 1);
                     draw_hline(&mut img, margin_x, underline_y, content_w, BORDER);
                     cursor_y += 4;
@@ -145,24 +118,54 @@ pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
             }
             BlockKind::Text => {
                 cursor_y += render_text_block(
-                    &mut img, &font, &block.content, margin_x + 20, cursor_y,
-                    content_w - 20, body_px, FG_TEXT, false,
+                    &mut img,
+                    font,
+                    glyphs,
+                    &block.content,
+                    margin_x + 20,
+                    cursor_y,
+                    content_w - 20,
+                    body_px,
+                    FG_TEXT,
+                    false,
                 );
                 cursor_y += line_gap_body;
             }
             BlockKind::Code { .. } => {
                 cursor_y += render_panel(
-                    &mut img, &font, &block.content, margin_x, cursor_y,
-                    content_w, body_px * 0.9, FG_CODE, PANEL_BG, BORDER,
+                    &mut img,
+                    font,
+                    glyphs,
+                    &block.content,
+                    margin_x,
+                    cursor_y,
+                    content_w,
+                    body_px * 0.9,
+                    FG_CODE,
+                    PANEL_BG,
+                    BORDER,
                 );
                 cursor_y += line_gap_body;
             }
             BlockKind::Exec { signature, .. } => {
-                let border_col = if signature.is_some() { FG_EXEC } else { [255, 107, 107, 255] };
+                let border_col = if signature.is_some() {
+                    FG_EXEC
+                } else {
+                    [255, 107, 107, 255]
+                };
                 let content = format!("$ {}", block.content);
                 cursor_y += render_panel(
-                    &mut img, &font, &content, margin_x, cursor_y,
-                    content_w, body_px * 0.9, FG_CODE, PANEL_BG, border_col,
+                    &mut img,
+                    font,
+                    glyphs,
+                    &content,
+                    margin_x,
+                    cursor_y,
+                    content_w,
+                    body_px * 0.9,
+                    FG_CODE,
+                    PANEL_BG,
+                    border_col,
                 );
                 cursor_y += line_gap_body;
             }
@@ -173,8 +176,17 @@ pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
                     block.content.clone()
                 };
                 cursor_y += render_panel(
-                    &mut img, &font, &text, margin_x, cursor_y,
-                    content_w, body_px * 0.85, FG_OUTPUT, PANEL_BG, BORDER,
+                    &mut img,
+                    font,
+                    glyphs,
+                    &text,
+                    margin_x,
+                    cursor_y,
+                    content_w,
+                    body_px * 0.85,
+                    FG_OUTPUT,
+                    PANEL_BG,
+                    BORDER,
                 );
                 cursor_y += line_gap_body;
             }
@@ -186,7 +198,7 @@ pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
         cursor_y += block_gap / 2;
     }
 
-    // フッター（ページ番号）
+    // フッター
     let footer = format!(
         "{}/{}  font {}px",
         app.current_slide + 1,
@@ -194,17 +206,30 @@ pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
         app.presentation.font_size
     );
     render_text_block(
-        &mut img, &font, &footer,
-        margin_x, canvas_h as i32 - body_px as i32 - 8,
-        content_w, body_px * 0.8, FG_MUTED, false,
+        &mut img,
+        font,
+        glyphs,
+        &footer,
+        margin_x,
+        canvas_h as i32 - body_px as i32 - 8,
+        content_w,
+        body_px * 0.8,
+        FG_MUTED,
+        false,
     );
 
-    // ヒントライン
     let hint = "h/l スライド  +/- font  j/k ブロック  Esc 終了";
     render_text_block(
-        &mut img, &font, hint,
-        margin_x, canvas_h as i32 - body_px as i32 * 2 - 8,
-        content_w, body_px * 0.75, FG_ACCENT, false,
+        &mut img,
+        font,
+        glyphs,
+        hint,
+        margin_x,
+        canvas_h as i32 - body_px as i32 * 2 - 8,
+        content_w,
+        body_px * 0.75,
+        FG_ACCENT,
+        false,
     );
 
     // PNG エンコード
@@ -216,6 +241,9 @@ pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
             .ok()?;
     }
 
+    // 使用済み RGBA バッファをプールに返却
+    canvas.return_buffer(img.into_raw());
+
     Some(png_buf)
 }
 
@@ -223,10 +251,10 @@ pub fn render_slide_to_png(app: &App, cfg: &RenderConfig) -> Option<Vec<u8>> {
 // ヘルパー
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// テキストブロックをレンダリングし、使用した高さ（px）を返す。
 fn render_text_block(
     img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
     font: &fontdue::Font,
+    glyphs: &mut GlyphCache,
     text: &str,
     x: i32,
     y: i32,
@@ -241,7 +269,6 @@ fn render_text_block(
     let img_w = img.width() as i32;
 
     for raw_line in text.lines() {
-        // 簡易ワードラップ（文字数ベース）
         let char_w = estimate_char_w(font_px);
         let max_chars = ((max_w as f32) / char_w).max(1.0) as usize;
 
@@ -250,17 +277,17 @@ fn render_text_block(
             if pen_y + line_h > img_h {
                 break;
             }
-            draw_text_line(img, font, &line, x, pen_y, font_px, color, img_w, img_h);
+            draw_text_line(img, font, glyphs, &line, x, pen_y, font_px, color, img_w, img_h);
             pen_y += line_h;
         }
     }
     (pen_y - y).max(line_h)
 }
 
-/// パネル（枠付きブロック）をレンダリングし、使用した高さを返す。
 fn render_panel(
     img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
     font: &fontdue::Font,
+    glyphs: &mut GlyphCache,
     text: &str,
     x: i32,
     y: i32,
@@ -277,7 +304,6 @@ fn render_panel(
     let img_h = img.height() as i32;
     let img_w = img.width() as i32;
 
-    // 行数を先に計算
     let mut all_lines: Vec<String> = Vec::new();
     for raw in text.lines() {
         all_lines.extend(wrap_text(raw, max_chars));
@@ -287,41 +313,38 @@ fn render_panel(
     }
     let total_h = all_lines.len() as i32 * line_h + pad * 2;
 
-    // 背景塗り
     fill_rect(img, x, y, max_w, total_h, bg, img_w, img_h);
-    // 枠線（1px）
     draw_rect_border(img, x, y, max_w, total_h, border, img_w, img_h);
 
     let mut pen_y = y + pad;
     for line in &all_lines {
-        draw_text_line(img, font, line, x + pad, pen_y, font_px, fg, img_w, img_h);
+        draw_text_line(img, font, glyphs, line, x + pad, pen_y, font_px, fg, img_w, img_h);
         pen_y += line_h;
     }
     total_h
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_text_line(
     img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
     font: &fontdue::Font,
+    glyphs: &mut GlyphCache,
     text: &str,
     x: i32,
-    pen_y: i32,     // ラインボックスの上端 (Y 増加 = 下方向)
+    pen_y: i32,
     font_px: f32,
     color: [u8; 4],
     img_w: i32,
     img_h: i32,
 ) {
-    // ベースラインはラインボックス上端からアセンダー分下
     let baseline_y = pen_y + (font_px * 0.78) as i32;
     let mut pen_x = x as f32;
 
     for ch in text.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, font_px);
-        // fontdue: bitmap row 0 = グリフ上端, ymin = ベースラインからグリフ下端までの符号付き距離
-        // 画像座標 (Y 増加 = 下) での配置:
-        //   グリフ上端の py = baseline_y - (ymin + height)
-        //   row r の py    = グリフ上端 + r
-        let glyph_top = baseline_y - (metrics.ymin as i32 + metrics.height as i32);
+        let glyph = glyphs.rasterize(font, ch, font_px);
+        let metrics = &glyph.metrics;
+        let bitmap = &glyph.bitmap;
+        let glyph_top = baseline_y - (metrics.ymin + metrics.height as i32);
         for row in 0..metrics.height {
             let py = glyph_top + row as i32;
             if py < 0 || py >= img_h {
@@ -332,7 +355,7 @@ fn draw_text_line(
                 if px_val == 0 {
                     continue;
                 }
-                let px = pen_x as i32 + metrics.xmin as i32 + col as i32;
+                let px = pen_x as i32 + metrics.xmin + col as i32;
                 if px < 0 || px >= img_w {
                     continue;
                 }
@@ -357,7 +380,10 @@ fn blend(bg: u8, fg: u8, alpha: f32) -> u8 {
 
 fn draw_hline(
     img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
-    x: i32, y: i32, w: i32, color: [u8; 4],
+    x: i32,
+    y: i32,
+    w: i32,
+    color: [u8; 4],
 ) {
     let img_w = img.width() as i32;
     let img_h = img.height() as i32;
@@ -372,10 +398,16 @@ fn draw_hline(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fill_rect(
     img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
-    x: i32, y: i32, w: i32, h: i32, color: [u8; 4],
-    img_w: i32, img_h: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: [u8; 4],
+    img_w: i32,
+    img_h: i32,
 ) {
     for dy in 0..h {
         let py = y + dy;
@@ -391,12 +423,17 @@ fn fill_rect(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_rect_border(
     img: &mut ImageBuffer<Rgba<u8>, Vec<u8>>,
-    x: i32, y: i32, w: i32, h: i32, color: [u8; 4],
-    img_w: i32, img_h: i32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    color: [u8; 4],
+    img_w: i32,
+    img_h: i32,
 ) {
-    // top / bottom
     for dx in 0..w {
         let px = x + dx;
         if px >= 0 && px < img_w {
@@ -409,7 +446,6 @@ fn draw_rect_border(
             }
         }
     }
-    // left / right
     for dy in 0..h {
         let py = y + dy;
         if py >= 0 && py < img_h {
@@ -424,12 +460,10 @@ fn draw_rect_border(
     }
 }
 
-/// 1文字あたりのおおよその幅（等幅近似）
 fn estimate_char_w(font_px: f32) -> f32 {
     font_px * 0.6
 }
 
-/// 簡易折り返し（最大文字数で切る）
 fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
     if text.is_empty() {
         return vec![String::new()];
@@ -438,7 +472,6 @@ fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
     let mut current = String::new();
     let mut count = 0;
     for ch in text.chars() {
-        // CJK は 2カウント
         let w = if ch.is_ascii() { 1 } else { 2 };
         if count + w > max_chars && !current.is_empty() {
             lines.push(current.clone());
@@ -459,11 +492,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn font_load_attempt_does_not_panic() {
-        let _ = load_font_bytes();
-    }
-
-    #[test]
     fn wrap_text_works() {
         let lines = wrap_text("Hello World", 6);
         assert!(lines.len() >= 2, "expected wrap, got {:?}", lines);
@@ -479,11 +507,34 @@ mod tests {
         app.mode = AppMode::Present;
         let cfg = RenderConfig::default();
         let result = render_slide_to_png(&app, &cfg);
-        assert!(result.is_some(), "render_slide_to_png returned None (font not found?)");
+        assert!(
+            result.is_some(),
+            "render_slide_to_png returned None (font not found?)"
+        );
         let png = result.unwrap();
         assert!(png.len() > 1000, "PNG too small: {} bytes", png.len());
         assert_eq!(&png[..4], b"\x89PNG", "not a valid PNG");
         eprintln!("PNG generated: {} bytes", png.len());
+    }
+
+    #[test]
+    fn render_with_cache_matches_without_cache() {
+        use crate::app::{App, AppMode};
+        use crate::model::Presentation;
+        let pres = Presentation::demo();
+        let mut app = App::new(pres);
+        app.presentation.font_size = 18;
+        app.mode = AppMode::Present;
+        let cfg = RenderConfig::default();
+
+        let png_a = render_slide_to_png(&app, &cfg);
+        let mut glyphs = GlyphCache::default();
+        let mut canvas = CanvasPool::new();
+        let png_b = render_slide_to_png_with_caches(&app, &cfg, &mut glyphs, &mut canvas);
+        // 2 度目（キャッシュヒット）でも同じバイト列が出る
+        let png_c = render_slide_to_png_with_caches(&app, &cfg, &mut glyphs, &mut canvas);
+        assert_eq!(png_a, png_b);
+        assert_eq!(png_b, png_c);
     }
 }
 
@@ -494,16 +545,24 @@ mod write_png_test {
     use crate::model::Presentation;
 
     #[test]
-    #[ignore]  // cargo test -- --ignored で明示的に実行
+    #[ignore]
     fn write_png_to_tmp() {
         let pres = Presentation::demo();
         let mut app = App::new(pres);
-        app.go_to_slide(1); // 「概要」スライド
+        app.go_to_slide(1);
         app.presentation.font_size = 27;
         app.mode = AppMode::Present;
-        let cfg = RenderConfig { term_cols: 120, term_rows: 36, cell_w: 12, cell_h: 24 };
+        let cfg = RenderConfig {
+            term_cols: 120,
+            term_rows: 36,
+            cell_w: 12,
+            cell_h: 24,
+        };
         let png = render_slide_to_png(&app, &cfg).expect("render failed");
         std::fs::write("/tmp/slidecli_preview.png", &png).unwrap();
-        eprintln!("Written to /tmp/slidecli_preview.png ({} bytes)", png.len());
+        eprintln!(
+            "Written to /tmp/slidecli_preview.png ({} bytes)",
+            png.len()
+        );
     }
 }

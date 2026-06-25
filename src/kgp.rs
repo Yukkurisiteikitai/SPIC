@@ -27,11 +27,25 @@ pub fn is_supported() -> bool {
 }
 
 /// PNG バイト列を Kitty Graphics Protocol で stdout に送信する。
-/// `image_id`: 0 以外のときターミナルが画像をキャッシュし後で参照できる（今回は常に 1 を使う）。
-/// `x`, `y`: 配置する画面左上からのセル座標（0-indexed）。
-/// `cols`, `rows`: 占有セル数（ターミナルにリサイズを任せる場合は 0, 0）。
+/// 内部で base64 エンコードしてから [`display_png_encoded`] を呼ぶラッパ。
+/// パフォーマンス重視のループでは [`display_png_encoded`] を直接使い、
+/// base64 文字列を再利用すること。
+#[allow(dead_code)]
 pub fn display_png(png: &[u8], x: u16, y: u16, cols: u16, rows: u16) -> io::Result<()> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(png);
+    display_png_encoded(&encoded, x, y, cols, rows)
+}
+
+/// 事前に base64 エンコード済みの PNG ペイロードを送信する。
+/// [`crate::present::cache::FrameCache`] にペアでキャッシュした文字列を渡せば
+/// 毎フレームのエンコードを省ける。
+pub fn display_png_encoded(
+    encoded: &str,
+    x: u16,
+    y: u16,
+    cols: u16,
+    rows: u16,
+) -> io::Result<()> {
     let mut out = io::stdout().lock();
 
     // 1. 仮想カーソルをセル位置に移動（crossterm を使わず直接 CSI 送信）
@@ -44,14 +58,19 @@ pub fn display_png(png: &[u8], x: u16, y: u16, cols: u16, rows: u16) -> io::Resu
     // q=2   : quiet（エラー抑制）
     // c=cols, r=rows : セル占有数 (0=ターミナルが推測)
     let chunk_size = 4096;
-    let chunks: Vec<&[u8]> = encoded.as_bytes().chunks(chunk_size).collect();
-    let total = chunks.len();
+    let bytes = encoded.as_bytes();
+    let total = bytes.len().div_ceil(chunk_size);
+    if total == 0 {
+        return out.flush();
+    }
 
-    for (i, chunk) in chunks.iter().enumerate() {
-        let is_last = i == total - 1;
-        let m = if is_last { 0 } else { 1 }; // m=1: 続きあり, m=0: 最終チャンク
+    for i in 0..total {
+        let start = i * chunk_size;
+        let end = (start + chunk_size).min(bytes.len());
+        let chunk = &bytes[start..end];
+        let is_last = i + 1 == total;
+        let m = if is_last { 0 } else { 1 };
         if i == 0 {
-            // 最初のチャンク: 全パラメータを含める
             let header = if cols > 0 && rows > 0 {
                 format!("a=T,f=100,i=1,q=2,c={},r={},m={}", cols, rows, m)
             } else {
