@@ -58,6 +58,14 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
         // s: 選択中のexecブロックに署名
         KeyCode::Char('s') => app.sign_selected(),
 
+        // c: 実行中のexecをキャンセル
+        KeyCode::Char('c') => app.cancel_running_exec(),
+
+        // [ / PgUp: 出力スクロール上
+        KeyCode::Char('[') | KeyCode::PageUp => app.scroll_output_up(),
+        // ] / PgDn: 出力スクロール下
+        KeyCode::Char(']') | KeyCode::PageDown => app.scroll_output_down(),
+
         // a: AI審査（未実装・スタブ）
         KeyCode::Char('a') => {
             if app.is_exec_selected() {

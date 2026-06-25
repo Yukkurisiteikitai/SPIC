@@ -45,6 +45,9 @@ fn run_app(
     app: &mut App,
 ) -> Result<()> {
     loop {
+        // バックグラウンドのexecから来た出力イベントを取り込む
+        app.poll_exec_events();
+
         // モードに応じて描画関数を切り替え
         terminal.draw(|f| match app.mode {
             AppMode::Present     => ui::draw_present(f, app),

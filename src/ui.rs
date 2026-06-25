@@ -7,7 +7,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, AppMode};
+use crate::app::{App, AppMode, ExecStatus};
 use crate::model::BlockKind;
 
 // ── カラーパレット（モックのダークテーマに合わせる）─────────────
@@ -220,6 +220,7 @@ fn draw_canvas(f: &mut Frame<'_>, app: &App, area: Rect) {
 fn draw_blocks(f: &mut Frame<'_>, app: &App, area: Rect) {
     let slide = app.current_slide();
     let mut y = area.y;
+    let canvas_h = area.height;
 
     for (i, block) in slide.blocks.iter().enumerate() {
         if y >= area.y + area.height {
@@ -228,9 +229,14 @@ fn draw_blocks(f: &mut Frame<'_>, app: &App, area: Rect) {
         let is_selected = app.selected_block == Some(i);
         let is_editing  = is_selected && app.mode == AppMode::EditingBlock;
 
+        // 実行中exec の出力先 OutputPlaceholder かどうか
+        let is_running_target = app.running_exec.as_ref()
+            .map(|r| r.slide_idx == app.current_slide && r.placeholder_idx == Some(i))
+            .unwrap_or(false);
+
         // ブロックの高さを計算
         let content = if is_editing { &app.edit_buffer } else { &block.content };
-        let block_height = estimate_block_height(block, content, area.width);
+        let block_height = estimate_block_height(block, content, area.width, canvas_h, is_running_target);
         let block_height = block_height.min(area.y + area.height - y);
 
         let block_area = Rect {
@@ -245,10 +251,25 @@ fn draw_blocks(f: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-fn estimate_block_height(block: &crate::model::Block, content: &str, width: u16) -> u16 {
+fn estimate_block_height(
+    block: &crate::model::Block,
+    content: &str,
+    width: u16,
+    canvas_h: u16,
+    is_running_target: bool,
+) -> u16 {
     match &block.kind {
         BlockKind::Heading { .. }    => 3,
-        BlockKind::OutputPlaceholder => 3,
+        BlockKind::OutputPlaceholder => {
+            let lines = content.lines().count().max(1) as u16;
+            // 実行中は大きめに、終わってからもそれなりに表示
+            let cap = if is_running_target {
+                (canvas_h / 2).max(6)
+            } else {
+                (canvas_h / 3).max(4)
+            };
+            (lines + 2).clamp(3, cap)
+        }
         BlockKind::Separator         => 1,
         _ => {
             let lines = content.lines().count().max(1);
@@ -260,14 +281,21 @@ fn estimate_block_height(block: &crate::model::Block, content: &str, width: u16)
 
 fn draw_single_block(
     f: &mut Frame<'_>,
-    _app: &App,
+    app: &App,
     block: &crate::model::Block,
-    _idx: usize,
+    idx: usize,
     is_selected: bool,
     is_editing: bool,
     content: &str,
     area: Rect,
 ) {
+    // この OutputPlaceholder が走行中execの出力先か
+    let running_for_this = matches!(block.kind, BlockKind::OutputPlaceholder)
+        && app.running_exec.as_ref()
+            .map(|r| r.slide_idx == app.current_slide && r.placeholder_idx == Some(idx))
+            .unwrap_or(false);
+    let exec_status = app.running_exec.as_ref().map(|r| r.status);
+
     // ブロックの種別に応じた背景・ボーダー色
     let (bg, border_color) = match &block.kind {
         BlockKind::Exec { signature, .. } => {
@@ -278,7 +306,23 @@ fn draw_single_block(
                 (BG_EXEC, BORDER_EXEC)
             }
         }
-        BlockKind::OutputPlaceholder => (BG_SLIDE, Color::Rgb(42, 42, 42)),
+        BlockKind::OutputPlaceholder => {
+            let border = if running_for_this {
+                match exec_status {
+                    Some(ExecStatus::Running)        => FG_EXEC,
+                    Some(ExecStatus::Completed(_))   => BORDER_EXEC,
+                    Some(ExecStatus::Failed(_))
+                    | Some(ExecStatus::SpawnError)   => FG_WARN,
+                    Some(ExecStatus::Cancelled)     => FG_MUTED,
+                    None => Color::Rgb(42, 42, 42),
+                }
+            } else if is_selected {
+                BORDER_SEL
+            } else {
+                Color::Rgb(42, 42, 42)
+            };
+            (BG_SLIDE, border)
+        }
         _ => {
             if is_selected {
                 (BG_BLOCK_SEL, BORDER_SEL)
@@ -288,8 +332,25 @@ fn draw_single_block(
         }
     };
 
-    // ラベルテキスト（右上）
-    let label = block.label();
+    // ラベルテキスト（右上）— OutputPlaceholderだけ動的に
+    let dyn_label;
+    let label: &str = match &block.kind {
+        BlockKind::OutputPlaceholder if running_for_this => {
+            let running = app.running_exec.as_ref().unwrap();
+            let elapsed = running.finished_at
+                .unwrap_or_else(std::time::Instant::now)
+                .duration_since(running.started_at);
+            dyn_label = match running.status {
+                ExecStatus::Running       => format!("実行中… {:.1}s", elapsed.as_secs_f32()),
+                ExecStatus::Completed(c)  => format!("完了 exit {} ({:.1}s)", c, elapsed.as_secs_f32()),
+                ExecStatus::Failed(c)     => format!("失敗 exit {} ({:.1}s)", c, elapsed.as_secs_f32()),
+                ExecStatus::Cancelled     => "キャンセル".to_string(),
+                ExecStatus::SpawnError    => "起動失敗".to_string(),
+            };
+            dyn_label.as_str()
+        }
+        _ => block.label(),
+    };
     let label_style = match &block.kind {
         BlockKind::Exec { signature, .. } => {
             if signature.is_some() {
@@ -298,6 +359,13 @@ fn draw_single_block(
                 Style::default().fg(FG_WARN).bg(Color::Rgb(50, 20, 20))
             }
         }
+        BlockKind::OutputPlaceholder if running_for_this => match exec_status {
+            Some(ExecStatus::Running)      => Style::default().fg(FG_EXEC).bg(Color::Rgb(30, 50, 20)),
+            Some(ExecStatus::Completed(_)) => Style::default().fg(FG_EXEC).bg(Color::Rgb(20, 40, 20)),
+            Some(ExecStatus::Failed(_))
+            | Some(ExecStatus::SpawnError) => Style::default().fg(FG_WARN).bg(Color::Rgb(50, 20, 20)),
+            _ => Style::default().fg(FG_MUTED).bg(Color::Rgb(40, 40, 40)),
+        },
         _ => Style::default().fg(Color::Rgb(102, 102, 119)).bg(Color::Rgb(42, 42, 58)),
     };
 
@@ -355,14 +423,32 @@ fn draw_single_block(
             f.render_widget(Paragraph::new(vec![line]).style(Style::default().bg(bg)), inner);
         }
         BlockKind::OutputPlaceholder => {
-            let placeholder = if content.is_empty() {
-                "← 実行時にここに stdout が表示されます".to_string()
+            let (placeholder, fg, italic) = if content.is_empty() {
+                ("← 実行時にここに stdout が表示されます".to_string(),
+                 Color::Rgb(68, 68, 68), true)
             } else {
-                content.to_string()
+                (content.to_string(), Color::Rgb(200, 200, 200), false)
             };
+
+            // 実行中・実行後の自動スクロール: scroll=0は末尾追従
+            let total_lines = placeholder.lines().count() as u16;
+            let view_h = inner.height;
+            let scroll = if running_for_this {
+                let user_scroll = app.running_exec.as_ref().map(|r| r.scroll).unwrap_or(0);
+                if user_scroll == 0 {
+                    total_lines.saturating_sub(view_h)
+                } else {
+                    user_scroll.min(total_lines.saturating_sub(view_h))
+                }
+            } else {
+                0
+            };
+
+            let mut style = Style::default().fg(fg).bg(bg);
+            if italic { style = style.add_modifier(Modifier::ITALIC); }
             let widget = Paragraph::new(placeholder)
-                .style(Style::default().fg(Color::Rgb(68, 68, 68)).bg(bg)
-                    .add_modifier(Modifier::ITALIC))
+                .style(style)
+                .scroll((scroll, 0))
                 .wrap(Wrap { trim: false });
             f.render_widget(widget, inner);
         }
@@ -471,14 +557,21 @@ fn draw_statusbar(f: &mut Frame<'_>, app: &App, area: Rect) {
     let help_str = "Ctrl+S 保存  h/l スライド  j/k ブロック  e 編集  n 追加  ? ヘルプ";
 
     let status_msg = app.status_message.as_deref().unwrap_or("");
+    let running_hint = app.running_exec.as_ref()
+        .filter(|r| matches!(r.status, ExecStatus::Running))
+        .map(|_| " [c] キャンセル  [/]スクロール ");
 
-    let spans = vec![
+    let mut spans = vec![
         Span::styled(format!(" {} ", mode_str), Style::default().fg(FG_ACCENT).bg(BG_STATUSBAR).add_modifier(Modifier::BOLD)),
         Span::styled(format!("  {} ", slide_str), Style::default().fg(FG_SECONDARY).bg(BG_STATUSBAR)),
         Span::styled(format!("  {} ", exec_str), Style::default().fg(FG_EXEC).bg(BG_STATUSBAR)),
         Span::styled(format!("  {} ", font_str), Style::default().fg(FG_SECONDARY).bg(BG_STATUSBAR)),
         Span::styled(format!("  {} ", if status_msg.is_empty() { help_str } else { status_msg }), Style::default().fg(FG_MUTED).bg(BG_STATUSBAR)),
     ];
+    if let Some(hint) = running_hint {
+        spans.push(Span::styled(hint.to_string(),
+            Style::default().fg(FG_WARN).bg(BG_STATUSBAR).add_modifier(Modifier::BOLD)));
+    }
 
     f.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(BG_STATUSBAR)),
