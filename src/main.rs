@@ -54,6 +54,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App)
             AppMode::Present => ui::draw_present(f, app),
             AppMode::PresentExecConfirm => ui::draw_present_exec_confirm(f, app),
             AppMode::ExecConfirm => ui::draw_exec_confirm(f, app),
+            AppMode::Settings => ui::draw_settings(f, app),
+            AppMode::CommandInput => ui::draw_command_input(f, app),
             _ => ui::draw(f, app),
         })?;
 

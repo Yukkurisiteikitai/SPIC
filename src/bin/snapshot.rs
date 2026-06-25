@@ -1,7 +1,10 @@
 use ratatui::{backend::TestBackend, Terminal};
 use slidecli::app::{App, AppMode};
 use slidecli::model::Presentation;
-use slidecli::ui::{draw, draw_exec_confirm, draw_present, draw_present_exec_confirm};
+use slidecli::ui::{
+    draw, draw_command_input, draw_exec_confirm, draw_present, draw_present_exec_confirm,
+    draw_settings,
+};
 
 fn render(
     terminal: &mut Terminal<TestBackend>,
@@ -55,4 +58,17 @@ fn main() {
     app.mode = AppMode::Present;
     let mut t5 = Terminal::new(TestBackend::new(100, 30)).unwrap();
     render(&mut t5, &app, draw_present);
+
+    println!("\n=== 設定画面 ===");
+    app.mode = AppMode::Settings;
+    let mut t6 = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    render(&mut t6, &app, draw_settings);
+
+    println!("\n=== 設定コマンド入力 ===");
+    app.mode = AppMode::CommandInput;
+    app.command_return_mode = AppMode::Settings;
+    app.command_buffer = "font-size 20".to_string();
+    app.command_cursor = app.command_buffer.len();
+    let mut t7 = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    render(&mut t7, &app, draw_command_input);
 }

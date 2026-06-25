@@ -12,8 +12,86 @@ pub enum AppMode {
     EditingBlock,       // テキスト編集中
     BlockPicker,        // ブロック追加パレット
     ExecConfirm,        // exec実行確認オーバーレイ
+    Settings,           // 設定画面
+    CommandInput,       // : コマンド入力
     PresentExecConfirm, // プレゼン中exec実行確認オーバーレイ
     Present,            // プレゼンモード（全画面）
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UiTheme {
+    Dark,
+    Light,
+    HighContrast,
+}
+
+impl UiTheme {
+    pub fn label(self) -> &'static str {
+        match self {
+            UiTheme::Dark => "dark",
+            UiTheme::Light => "light",
+            UiTheme::HighContrast => "high-contrast",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dark" => Some(UiTheme::Dark),
+            "light" => Some(UiTheme::Light),
+            "high-contrast" | "highcontrast" | "contrast" => Some(UiTheme::HighContrast),
+            _ => None,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            UiTheme::Dark => UiTheme::Light,
+            UiTheme::Light => UiTheme::HighContrast,
+            UiTheme::HighContrast => UiTheme::Dark,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AccentColor {
+    Blue,
+    Green,
+    Pink,
+    Yellow,
+    Red,
+}
+
+impl AccentColor {
+    pub fn label(self) -> &'static str {
+        match self {
+            AccentColor::Blue => "blue",
+            AccentColor::Green => "green",
+            AccentColor::Pink => "pink",
+            AccentColor::Yellow => "yellow",
+            AccentColor::Red => "red",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "blue" => Some(AccentColor::Blue),
+            "green" => Some(AccentColor::Green),
+            "pink" | "magenta" => Some(AccentColor::Pink),
+            "yellow" => Some(AccentColor::Yellow),
+            "red" => Some(AccentColor::Red),
+            _ => None,
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            AccentColor::Blue => AccentColor::Green,
+            AccentColor::Green => AccentColor::Pink,
+            AccentColor::Pink => AccentColor::Yellow,
+            AccentColor::Yellow => AccentColor::Red,
+            AccentColor::Red => AccentColor::Blue,
+        }
+    }
 }
 
 pub enum ExecEvent {
@@ -51,9 +129,15 @@ pub struct App {
     pub mode: AppMode,
     pub edit_buffer: String,
     pub edit_cursor: usize,
+    pub command_buffer: String,
+    pub command_cursor: usize,
+    pub command_return_mode: AppMode,
+    pub settings_return_mode: AppMode,
     pub status_message: Option<String>,
     pub next_block_id: u64,
     pub running_exec: Option<RunningExec>,
+    pub ui_theme: UiTheme,
+    pub accent_color: AccentColor,
 }
 
 impl App {
@@ -74,9 +158,15 @@ impl App {
             mode: AppMode::Normal,
             edit_buffer: String::new(),
             edit_cursor: 0,
+            command_buffer: String::new(),
+            command_cursor: 0,
+            command_return_mode: AppMode::Normal,
+            settings_return_mode: AppMode::Normal,
             status_message: None,
             next_block_id: next_id,
             running_exec: None,
+            ui_theme: UiTheme::Dark,
+            accent_color: AccentColor::Blue,
         }
     }
 
@@ -590,6 +680,178 @@ impl App {
 
     pub fn exit_present(&mut self) {
         self.mode = AppMode::Normal;
+    }
+
+    // ── 設定・コマンド ───────────────────────────────
+
+    pub fn enter_settings(&mut self) {
+        if !matches!(self.mode, AppMode::Settings | AppMode::CommandInput) {
+            self.settings_return_mode = self.mode.clone();
+        }
+        self.mode = AppMode::Settings;
+    }
+
+    pub fn exit_settings(&mut self) {
+        self.mode = self.settings_return_mode.clone();
+    }
+
+    pub fn start_command(&mut self) {
+        if !matches!(self.mode, AppMode::CommandInput) {
+            self.command_return_mode = self.mode.clone();
+        }
+        self.command_buffer.clear();
+        self.command_cursor = 0;
+        self.mode = AppMode::CommandInput;
+    }
+
+    pub fn cancel_command(&mut self) {
+        self.mode = self.command_return_mode.clone();
+    }
+
+    pub fn insert_command_char(&mut self, ch: char) {
+        let cursor = self.command_cursor;
+        self.command_buffer.insert(cursor, ch);
+        self.command_cursor += ch.len_utf8();
+    }
+
+    pub fn delete_command_char_before(&mut self) {
+        if self.command_cursor > 0 {
+            let cursor = self.command_cursor;
+            let mut new_cursor = cursor - 1;
+            while !self.command_buffer.is_char_boundary(new_cursor) {
+                new_cursor -= 1;
+            }
+            self.command_buffer.drain(new_cursor..cursor);
+            self.command_cursor = new_cursor;
+        }
+    }
+
+    pub fn command_cursor_left(&mut self) {
+        if self.command_cursor > 0 {
+            self.command_cursor -= 1;
+            while !self.command_buffer.is_char_boundary(self.command_cursor) {
+                self.command_cursor -= 1;
+            }
+        }
+    }
+
+    pub fn command_cursor_right(&mut self) {
+        if self.command_cursor < self.command_buffer.len() {
+            self.command_cursor += 1;
+            while !self.command_buffer.is_char_boundary(self.command_cursor) {
+                self.command_cursor += 1;
+            }
+        }
+    }
+
+    pub fn commit_command(&mut self) {
+        let raw = self.command_buffer.trim().to_string();
+        let return_mode = self.command_return_mode.clone();
+
+        if raw.is_empty() {
+            self.mode = return_mode;
+            return;
+        }
+
+        if matches!(raw.as_str(), "settings" | "config") {
+            self.mode = return_mode;
+            self.enter_settings();
+            self.set_status("設定画面を開きました".to_string());
+            return;
+        }
+
+        let result = self.apply_command(&raw);
+        self.mode = return_mode;
+        match result {
+            Ok(msg) => self.set_status(msg),
+            Err(msg) => self.set_status(msg),
+        }
+    }
+
+    fn apply_command(&mut self, raw: &str) -> Result<String, String> {
+        let mut parts = raw.split_whitespace();
+        let Some(command) = parts.next() else {
+            return Ok(String::new());
+        };
+        let value = parts.collect::<Vec<_>>().join(" ");
+
+        match command {
+            "font-size" | "fontsize" => {
+                let size = value
+                    .parse::<u8>()
+                    .map_err(|_| "font-size は数値で指定してください: :font-size 20".to_string())?;
+                self.set_font_size(size);
+                Ok(format!(
+                    "font-size を {} にしました",
+                    self.presentation.font_size
+                ))
+            }
+            "font" | "font-name" | "font-family" => {
+                if value.is_empty() {
+                    return Err(
+                        "font-name を指定してください: :font-name JetBrains Mono".to_string()
+                    );
+                }
+                self.presentation.font_name = value;
+                Ok(format!(
+                    "font-name を {} にしました",
+                    self.presentation.font_name
+                ))
+            }
+            "theme" => {
+                let theme = UiTheme::parse(&value.to_ascii_lowercase()).ok_or_else(|| {
+                    "theme は dark / light / high-contrast から指定してください".to_string()
+                })?;
+                self.ui_theme = theme;
+                Ok(format!("theme を {} にしました", self.ui_theme.label()))
+            }
+            "accent" | "accent-color" => {
+                let accent = AccentColor::parse(&value.to_ascii_lowercase()).ok_or_else(|| {
+                    "accent は blue / green / pink / yellow / red から指定してください".to_string()
+                })?;
+                self.accent_color = accent;
+                Ok(format!(
+                    "accent を {} にしました",
+                    self.accent_color.label()
+                ))
+            }
+            _ => Err(format!("未知の設定コマンドです: {}", command)),
+        }
+    }
+
+    pub fn set_font_size(&mut self, size: u8) {
+        self.presentation.font_size = size.clamp(8, 72);
+    }
+
+    pub fn increase_font_size(&mut self) {
+        self.set_font_size(self.presentation.font_size.saturating_add(1));
+        self.set_status(format!("font-size: {}", self.presentation.font_size));
+    }
+
+    pub fn decrease_font_size(&mut self) {
+        self.set_font_size(self.presentation.font_size.saturating_sub(1));
+        self.set_status(format!("font-size: {}", self.presentation.font_size));
+    }
+
+    pub fn cycle_font_name(&mut self) {
+        let next = match self.presentation.font_name.as_str() {
+            "JetBrains Mono" => "Fira Code",
+            "Fira Code" => "SF Mono",
+            "SF Mono" => "Hack",
+            _ => "JetBrains Mono",
+        };
+        self.presentation.font_name = next.to_string();
+        self.set_status(format!("font-name: {}", self.presentation.font_name));
+    }
+
+    pub fn cycle_theme(&mut self) {
+        self.ui_theme = self.ui_theme.next();
+        self.set_status(format!("theme: {}", self.ui_theme.label()));
+    }
+
+    pub fn cycle_accent(&mut self) {
+        self.accent_color = self.accent_color.next();
+        self.set_status(format!("accent: {}", self.accent_color.label()));
     }
 
     // ── ユーティリティ ───────────────────────────────

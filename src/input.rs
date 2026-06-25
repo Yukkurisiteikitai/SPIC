@@ -13,6 +13,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         AppMode::EditingBlock => handle_editing(app, key),
         AppMode::BlockPicker => handle_picker(app, key),
         AppMode::ExecConfirm => handle_exec_confirm(app, key),
+        AppMode::Settings => handle_settings(app, key),
+        AppMode::CommandInput => handle_command_input(app, key),
         AppMode::PresentExecConfirm => handle_present_exec_confirm(app, key),
         AppMode::Present => handle_present(app, key),
     }
@@ -24,6 +26,10 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
         match key.code {
             KeyCode::Char('s') => {
                 app.set_status("保存しました（未実装）");
+                return Action::None;
+            }
+            KeyCode::Char('q') => {
+                app.enter_settings();
                 return Action::None;
             }
             KeyCode::Char('c') => return Action::Quit,
@@ -81,6 +87,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
 
         // ── プレゼンモード ────────────────────────────
         KeyCode::Char('p') => app.enter_present(),
+
+        // : コマンド
+        KeyCode::Char(':') => app.start_command(),
 
         // 数字キーでスライドジャンプ
         KeyCode::Char(c) if c.is_ascii_digit() && c != '0' => {
@@ -197,8 +206,65 @@ fn handle_present_exec_confirm(app: &mut App, key: KeyEvent) -> Action {
     Action::None
 }
 
+// ── 設定画面 ────────────────────────────────────────────────
+fn handle_settings(app: &mut App, key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('q') => app.exit_settings(),
+            KeyCode::Char('c') => return Action::Quit,
+            _ => {}
+        }
+        return Action::None;
+    }
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.exit_settings(),
+        KeyCode::Char(':') => app.start_command(),
+        KeyCode::Char('+') | KeyCode::Char('=') => app.increase_font_size(),
+        KeyCode::Char('-') => app.decrease_font_size(),
+        KeyCode::Char('f') => app.cycle_font_name(),
+        KeyCode::Char('t') => app.cycle_theme(),
+        KeyCode::Char('a') => app.cycle_accent(),
+        _ => {}
+    }
+    Action::None
+}
+
+// ── : コマンド入力 ───────────────────────────────────────────
+fn handle_command_input(app: &mut App, key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('c') => app.cancel_command(),
+            _ => {}
+        }
+        return Action::None;
+    }
+
+    match key.code {
+        KeyCode::Esc => app.cancel_command(),
+        KeyCode::Enter => app.commit_command(),
+        KeyCode::Backspace => app.delete_command_char_before(),
+        KeyCode::Left => app.command_cursor_left(),
+        KeyCode::Right => app.command_cursor_right(),
+        KeyCode::Char(c) => app.insert_command_char(c),
+        _ => {}
+    }
+    Action::None
+}
+
 // ── プレゼンモード ────────────────────────────────────────────
 fn handle_present(app: &mut App, key: KeyEvent) -> Action {
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        match key.code {
+            KeyCode::Char('q') => {
+                app.enter_settings();
+                return Action::None;
+            }
+            KeyCode::Char('c') => return Action::Quit,
+            _ => {}
+        }
+    }
+
     match key.code {
         // 次スライド
         KeyCode::Char('l') | KeyCode::Right => app.next_slide(),
@@ -224,6 +290,7 @@ fn handle_present(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('c') => app.cancel_running_exec(),
         KeyCode::Char('[') | KeyCode::PageUp => app.scroll_output_up(),
         KeyCode::Char(']') | KeyCode::PageDown => app.scroll_output_down(),
+        KeyCode::Char(':') => app.start_command(),
 
         // プレゼン終了
         KeyCode::Esc | KeyCode::Char('q') => app.exit_present(),

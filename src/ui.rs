@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, AppMode, ExecStatus};
+use crate::app::{AccentColor, App, AppMode, ExecStatus, UiTheme};
 use crate::model::BlockKind;
 
 // ── カラーパレット（モックのダークテーマに合わせる）─────────────
@@ -36,6 +36,38 @@ const BORDER_DIM: Color = Color::Rgb(42, 42, 42); // #2a2a2a  薄いボーダー
 const BORDER_SEL: Color = Color::Rgb(74, 158, 255); // 選択中ボーダー（青）
 const BORDER_EXEC: Color = Color::Rgb(58, 90, 42); // execボーダー（緑）
 const BORDER_EXEC_SEL: Color = Color::Rgb(106, 176, 76); // exec選択中ボーダー
+
+fn accent_color(app: &App) -> Color {
+    match app.accent_color {
+        AccentColor::Blue => FG_ACCENT,
+        AccentColor::Green => FG_EXEC,
+        AccentColor::Pink => Color::Rgb(230, 112, 190),
+        AccentColor::Yellow => Color::Rgb(230, 184, 72),
+        AccentColor::Red => FG_WARN,
+    }
+}
+
+fn settings_panel_bg(app: &App) -> Color {
+    match app.ui_theme {
+        UiTheme::Dark => Color::Rgb(24, 24, 28),
+        UiTheme::Light => Color::Rgb(232, 232, 224),
+        UiTheme::HighContrast => Color::Black,
+    }
+}
+
+fn settings_fg(app: &App) -> Color {
+    match app.ui_theme {
+        UiTheme::Light => Color::Rgb(36, 36, 36),
+        _ => FG_PRIMARY,
+    }
+}
+
+fn settings_muted_fg(app: &App) -> Color {
+    match app.ui_theme {
+        UiTheme::Light => Color::Rgb(88, 88, 88),
+        _ => FG_MUTED,
+    }
+}
 
 pub fn draw(f: &mut Frame<'_>, app: &App) {
     let area = f.size();
@@ -217,6 +249,7 @@ fn draw_blocks(f: &mut Frame<'_>, app: &App, area: Rect) {
     let slide = app.current_slide();
     let mut y = area.y;
     let canvas_h = area.height;
+    let zoom = font_zoom(app);
 
     for (i, block) in slide.blocks.iter().enumerate() {
         if y >= area.y + area.height {
@@ -239,7 +272,7 @@ fn draw_blocks(f: &mut Frame<'_>, app: &App, area: Rect) {
             &block.content
         };
         let block_height =
-            estimate_block_height(block, content, area.width, canvas_h, is_running_target);
+            estimate_block_height(block, content, area.width, canvas_h, is_running_target, zoom);
         let block_height = block_height.min(area.y + area.height - y);
 
         let block_area = Rect {
@@ -259,7 +292,7 @@ fn draw_blocks(f: &mut Frame<'_>, app: &App, area: Rect) {
             content,
             block_area,
         );
-        y += block_height + 1; // ブロック間の隙間
+        y += block_height + zoom; // ブロック間の隙間
     }
 }
 
@@ -269,11 +302,13 @@ fn estimate_block_height(
     width: u16,
     canvas_h: u16,
     is_running_target: bool,
+    zoom: u16,
 ) -> u16 {
     match &block.kind {
-        BlockKind::Heading { .. } => 3,
+        BlockKind::Heading { .. } => (zoomed_line_count(1, zoom) + 2).max(3),
         BlockKind::OutputPlaceholder => {
             let lines = content.lines().count().max(1) as u16;
+            let lines = zoomed_line_count(lines, zoom);
             // 実行中は大きめに、終わってからもそれなりに表示
             let cap = if is_running_target {
                 (canvas_h / 2).max(6)
@@ -284,9 +319,10 @@ fn estimate_block_height(
         }
         BlockKind::Separator => 1,
         _ => {
-            let lines = content.lines().count().max(1);
+            let lines = content.lines().count().max(1) as u16;
+            let lines = zoomed_line_count(lines, zoom);
             let wrapped = (content.len() as u16 / width.max(1)).max(0);
-            (lines as u16 + wrapped + 2).min(8)
+            (lines + wrapped + 2).min(8 * zoom)
         }
     }
 }
@@ -301,6 +337,7 @@ fn draw_single_block(
     content: &str,
     area: Rect,
 ) {
+    let zoom = font_zoom(app);
     // この OutputPlaceholder が走行中execの出力先か
     let running_for_this = matches!(block.kind, BlockKind::OutputPlaceholder)
         && app
@@ -439,23 +476,34 @@ fn draw_single_block(
             } else {
                 content.to_string()
             };
-            let widget = Paragraph::new(text)
+            let widget = Paragraph::new(zoomed_text(&text, zoom))
                 .style(Style::default().fg(fg).bg(bg).add_modifier(size_mod))
                 .wrap(Wrap { trim: false });
             f.render_widget(widget, inner);
         }
         BlockKind::Exec { lang, .. } => {
             // langバッジ + コード
-            let badge = Span::styled(
-                format!(" {} ", lang),
-                Style::default().fg(FG_EXEC).bg(Color::Rgb(30, 58, 20)),
-            );
-            let code = Span::styled(format!(" {}", content), Style::default().fg(FG_CODE).bg(bg));
-            let line = Line::from(vec![badge, code]);
-            f.render_widget(
-                Paragraph::new(vec![line]).style(Style::default().bg(bg)),
-                inner,
-            );
+            if zoom <= 1 {
+                let badge = Span::styled(
+                    format!(" {} ", lang),
+                    Style::default().fg(FG_EXEC).bg(Color::Rgb(30, 58, 20)),
+                );
+                let code =
+                    Span::styled(format!(" {}", content), Style::default().fg(FG_CODE).bg(bg));
+                let line = Line::from(vec![badge, code]);
+                f.render_widget(
+                    Paragraph::new(vec![line]).style(Style::default().bg(bg)),
+                    inner,
+                );
+            } else {
+                let text = format!("[{}]\n{}", lang, content);
+                f.render_widget(
+                    Paragraph::new(zoomed_text(&text, zoom))
+                        .style(Style::default().fg(FG_CODE).bg(bg))
+                        .wrap(Wrap { trim: false }),
+                    inner,
+                );
+            }
         }
         BlockKind::OutputPlaceholder => {
             let (placeholder, fg, italic) = if content.is_empty() {
@@ -486,7 +534,8 @@ fn draw_single_block(
             if italic {
                 style = style.add_modifier(Modifier::ITALIC);
             }
-            let widget = Paragraph::new(placeholder)
+            let display_placeholder = zoomed_text(&placeholder, zoom);
+            let widget = Paragraph::new(display_placeholder)
                 .style(style)
                 .scroll((scroll, 0))
                 .wrap(Wrap { trim: false });
@@ -510,7 +559,7 @@ fn draw_single_block(
                 BlockKind::Code { .. } => FG_CODE,
                 _ => FG_SECONDARY,
             };
-            let widget = Paragraph::new(text)
+            let widget = Paragraph::new(zoomed_text(&text, zoom))
                 .style(Style::default().fg(fg).bg(bg))
                 .wrap(Wrap { trim: false });
             f.render_widget(widget, inner);
@@ -519,14 +568,14 @@ fn draw_single_block(
 }
 
 // ── ツールバー ───────────────────────────────────────────────────
-fn draw_toolbar(f: &mut Frame<'_>, _app: &App, area: Rect) {
+fn draw_toolbar(f: &mut Frame<'_>, app: &App, area: Rect) {
     f.render_widget(
         Block::default().style(Style::default().bg(BG_TOOLBAR)),
         area,
     );
 
     let items: Vec<(&str, Color)> = vec![
-        ("T 見出し", FG_ACCENT),
+        ("T 見出し", accent_color(app)),
         ("¶ テキスト", FG_SECONDARY),
         ("⌥ コード", FG_SECONDARY),
         ("▶ exec", FG_EXEC),
@@ -570,6 +619,8 @@ fn draw_statusbar(f: &mut Frame<'_>, app: &App, area: Rect) {
         AppMode::EditingBlock => "テキスト編集",
         AppMode::BlockPicker => "ブロック追加",
         AppMode::ExecConfirm => "実行確認",
+        AppMode::Settings => "設定",
+        AppMode::CommandInput => "コマンド",
         AppMode::PresentExecConfirm => "プレゼン実行確認",
         AppMode::Present => "プレゼン",
     };
@@ -589,7 +640,7 @@ fn draw_statusbar(f: &mut Frame<'_>, app: &App, area: Rect) {
         app.presentation.font_name, app.presentation.font_size,
     );
 
-    let help_str = "Ctrl+S 保存  h/l スライド  j/k ブロック  e 編集  n 追加  ? ヘルプ";
+    let help_str = "Ctrl+Q 設定  : コマンド  Ctrl+S 保存  h/l スライド  j/k ブロック";
 
     let status_msg = app.status_message.as_deref().unwrap_or("");
     let running_hint = app
@@ -602,7 +653,7 @@ fn draw_statusbar(f: &mut Frame<'_>, app: &App, area: Rect) {
         Span::styled(
             format!(" {} ", mode_str),
             Style::default()
-                .fg(FG_ACCENT)
+                .fg(accent_color(app))
                 .bg(BG_STATUSBAR)
                 .add_modifier(Modifier::BOLD),
         ),
@@ -710,7 +761,243 @@ fn draw_block_picker(f: &mut Frame<'_>, _app: &App, area: Rect) {
     );
 }
 
+// ── 設定画面 ───────────────────────────────────────────────
+pub fn draw_settings(f: &mut Frame<'_>, app: &App) {
+    let area = f.size();
+    let bg = settings_panel_bg(app);
+    let fg = settings_fg(app);
+    let muted = settings_muted_fg(app);
+    let accent = accent_color(app);
+
+    f.render_widget(Block::default().style(Style::default().bg(BG_BASE)), area);
+
+    if area.width < 12 || area.height < 8 {
+        return;
+    }
+
+    let width = area.width.saturating_sub(4).min(86);
+    let height = area.height.saturating_sub(4).min(24);
+    let panel = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+
+    f.render_widget(Clear, panel);
+    f.render_widget(
+        Block::default()
+            .title(" Settings ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(accent))
+            .style(Style::default().bg(bg)),
+        panel,
+    );
+
+    let inner = Rect {
+        x: panel.x + 3,
+        y: panel.y + 2,
+        width: panel.width.saturating_sub(6),
+        height: panel.height.saturating_sub(4),
+    };
+
+    let lines = vec![
+        Line::from(vec![Span::styled(
+            "Appearance",
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(""),
+        setting_line(
+            "font-size",
+            &format!("{}", app.presentation.font_size),
+            "+ / -",
+            fg,
+            muted,
+            bg,
+            accent,
+        ),
+        setting_line(
+            "font-name",
+            &app.presentation.font_name,
+            "f",
+            fg,
+            muted,
+            bg,
+            accent,
+        ),
+        setting_line("theme", app.ui_theme.label(), "t", fg, muted, bg, accent),
+        setting_line(
+            "accent",
+            app.accent_color.label(),
+            "a",
+            fg,
+            muted,
+            bg,
+            accent,
+        ),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "Commands",
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![
+            Span::styled(" :font-size 20", Style::default().fg(accent).bg(bg)),
+            Span::styled(
+                "    :font-name JetBrains Mono",
+                Style::default().fg(muted).bg(bg),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" :theme dark", Style::default().fg(accent).bg(bg)),
+            Span::styled("       :accent green", Style::default().fg(muted).bg(bg)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                " Esc/q ",
+                Style::default()
+                    .fg(accent)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("戻る   ", Style::default().fg(muted).bg(bg)),
+            Span::styled(
+                ": ",
+                Style::default()
+                    .fg(accent)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("直接入力", Style::default().fg(muted).bg(bg)),
+        ]),
+    ];
+
+    f.render_widget(
+        Paragraph::new(Text::from(lines))
+            .style(Style::default().fg(fg).bg(bg))
+            .wrap(Wrap { trim: false }),
+        inner,
+    );
+}
+
+fn setting_line(
+    label: &str,
+    value: &str,
+    shortcut: &str,
+    fg: Color,
+    muted: Color,
+    bg: Color,
+    accent: Color,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!(" {:<11}", label), Style::default().fg(muted).bg(bg)),
+        Span::styled(
+            value.to_string(),
+            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("   [{}]", shortcut),
+            Style::default().fg(accent).bg(bg),
+        ),
+    ])
+}
+
+pub fn draw_command_input(f: &mut Frame<'_>, app: &App) {
+    match app.command_return_mode {
+        AppMode::Present => draw_present(f, app),
+        AppMode::PresentExecConfirm => draw_present_exec_confirm(f, app),
+        AppMode::ExecConfirm => draw_exec_confirm(f, app),
+        AppMode::Settings => draw_settings(f, app),
+        _ => draw(f, app),
+    }
+
+    draw_command_bar(f, app);
+}
+
+fn draw_command_bar(f: &mut Frame<'_>, app: &App) {
+    let area = f.size();
+    if area.width < 8 || area.height < 3 {
+        return;
+    }
+
+    let bar = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(3),
+        width: area.width,
+        height: 3,
+    };
+    f.render_widget(Clear, bar);
+    f.render_widget(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(accent_color(app)))
+            .style(Style::default().bg(BG_STATUSBAR)),
+        bar,
+    );
+
+    let input = command_buffer_with_cursor(app);
+    let inner = Rect {
+        x: bar.x + 2,
+        y: bar.y + 1,
+        width: bar.width.saturating_sub(4),
+        height: 1,
+    };
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(":", Style::default().fg(accent_color(app)).bg(BG_STATUSBAR)),
+            Span::styled(input, Style::default().fg(FG_PRIMARY).bg(BG_STATUSBAR)),
+        ])),
+        inner,
+    );
+}
+
+fn command_buffer_with_cursor(app: &App) -> String {
+    let mut input = app.command_buffer.clone();
+    let cursor = app.command_cursor.min(input.len());
+    input.insert(cursor, '▋');
+    input
+}
+
 // ── ユーティリティ ───────────────────────────────────────────────
+fn font_zoom(app: &App) -> u16 {
+    match app.presentation.font_size {
+        0..=16 => 1,
+        17..=32 => 2,
+        _ => 3,
+    }
+}
+
+fn zoomed_line_count(lines: u16, zoom: u16) -> u16 {
+    if lines == 0 {
+        1
+    } else {
+        lines + lines.saturating_sub(1) * zoom.saturating_sub(1)
+    }
+}
+
+fn zoomed_text(content: &str, zoom: u16) -> String {
+    if zoom <= 1 {
+        return content.to_string();
+    }
+
+    let mut result = String::new();
+    for (idx, line) in content.lines().enumerate() {
+        if idx > 0 {
+            result.push('\n');
+            for _ in 0..zoom.saturating_sub(1) {
+                result.push('\n');
+            }
+        }
+        result.push_str(line);
+    }
+
+    if result.is_empty() {
+        content.to_string()
+    } else {
+        result
+    }
+}
+
 fn truncate(s: &str, max_chars: usize) -> String {
     if max_chars == 0 {
         return String::new();
@@ -794,11 +1081,25 @@ impl PresentTypography {
 fn present_typography(app: &App, area: Rect) -> PresentTypography {
     let has_status = app.status_message.is_some();
     let text_weight = present_slide_text_weight(app);
-    let scales = [
-        PresentTextScale::Relaxed,
-        PresentTextScale::Balanced,
-        PresentTextScale::Compact,
-    ];
+    let scales = if app.presentation.font_size >= 18 {
+        [
+            PresentTextScale::Relaxed,
+            PresentTextScale::Balanced,
+            PresentTextScale::Compact,
+        ]
+    } else if app.presentation.font_size <= 12 {
+        [
+            PresentTextScale::Compact,
+            PresentTextScale::Balanced,
+            PresentTextScale::Relaxed,
+        ]
+    } else {
+        [
+            PresentTextScale::Balanced,
+            PresentTextScale::Relaxed,
+            PresentTextScale::Compact,
+        ]
+    };
 
     for scale in scales {
         let typography = PresentTypography::new(scale, area, has_status);
@@ -874,6 +1175,12 @@ fn spaces(width: u16) -> String {
     " ".repeat(width as usize)
 }
 
+fn push_zoom_gap(lines: &mut Vec<Line<'static>>, zoom: u16) {
+    for _ in 0..zoom.saturating_sub(1) {
+        lines.push(Line::from(""));
+    }
+}
+
 // ── プレゼンモード（全画面）────────────────────────────────────
 pub fn draw_present(f: &mut Frame<'_>, app: &App) {
     let area = f.size();
@@ -928,10 +1235,11 @@ fn present_block_height(
     width: u16,
     typography: PresentTypography,
 ) -> u16 {
+    let zoom = font_zoom(app);
     match &block.kind {
         BlockKind::Heading { level } => {
             let content_width = width.saturating_sub(typography.body_indent + 2).max(1);
-            let lines = wrapped_line_count(&block.content, content_width);
+            let lines = zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom);
             let underline = if typography.scale == PresentTextScale::Relaxed && *level == 1 {
                 1
             } else {
@@ -950,19 +1258,24 @@ fn present_block_height(
             } else {
                 0
             };
-            wrapped_line_count(&block.content, content_width) + extra
+            zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom) + extra
         }
         BlockKind::Code { .. } => {
             let content_width = width.saturating_sub(4).max(1);
-            (wrapped_line_count(&block.content, content_width) + 2).min(typography.code_max_lines)
+            (zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom) + 2)
+                .min(typography.code_max_lines * zoom)
         }
         BlockKind::Exec { .. } => {
             let content_width = width.saturating_sub(6).max(1);
-            (wrapped_line_count(&block.content, content_width) + 2).min(typography.exec_max_lines)
+            (zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom) + 2)
+                .min(typography.exec_max_lines * zoom)
         }
         BlockKind::OutputPlaceholder => {
             let max_lines = present_output_max_lines(app, idx, typography);
-            present_output_lines(app, idx, block, max_lines).len() as u16 + 2
+            zoomed_line_count(
+                present_output_lines(app, idx, block, max_lines).len() as u16,
+                zoom,
+            ) + 2
         }
         BlockKind::Separator => 1,
     }
