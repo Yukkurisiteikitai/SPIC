@@ -35,6 +35,12 @@ fn main() {
     let mut t1 = Terminal::new(TestBackend::new(100, 30)).unwrap();
     render(&mut t1, &app, draw);
 
+    println!("\n=== 通常エディタ（font-size 50）===");
+    app.presentation.font_size = 50;
+    let mut t1_zoom = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    render(&mut t1_zoom, &app, draw);
+    app.presentation.font_size = 14;
+
     println!("\n=== exec実行確認ダイアログ ===");
     app.mode = AppMode::ExecConfirm;
     let mut t2 = Terminal::new(TestBackend::new(100, 30)).unwrap();

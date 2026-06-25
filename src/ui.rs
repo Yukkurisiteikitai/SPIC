@@ -271,8 +271,14 @@ fn draw_blocks(f: &mut Frame<'_>, app: &App, area: Rect) {
         } else {
             &block.content
         };
-        let block_height =
-            estimate_block_height(block, content, area.width, canvas_h, is_running_target, zoom);
+        let block_height = estimate_block_height(
+            block,
+            content,
+            area.width,
+            canvas_h,
+            is_running_target,
+            zoom,
+        );
         let block_height = block_height.min(area.y + area.height - y);
 
         let block_area = Rect {
@@ -305,7 +311,10 @@ fn estimate_block_height(
     zoom: u16,
 ) -> u16 {
     match &block.kind {
-        BlockKind::Heading { .. } => (zoomed_line_count(1, zoom) + 2).max(3),
+        BlockKind::Heading { .. } => {
+            let lines = content.lines().count().max(1) as u16;
+            (zoomed_line_count(lines, zoom) + 2).max(3)
+        }
         BlockKind::OutputPlaceholder => {
             let lines = content.lines().count().max(1) as u16;
             let lines = zoomed_line_count(lines, zoom);
@@ -318,6 +327,12 @@ fn estimate_block_height(
             (lines + 2).clamp(3, cap)
         }
         BlockKind::Separator => 1,
+        BlockKind::Exec { .. } => {
+            let content_lines = content.lines().count().max(1) as u16;
+            let lines = zoomed_line_count(content_lines, zoom);
+            let wrapped = (content.len() as u16 / width.max(1)).max(0);
+            (lines + wrapped + 2).min(8 * zoom)
+        }
         _ => {
             let lines = content.lines().count().max(1) as u16;
             let lines = zoomed_line_count(lines, zoom);
@@ -496,7 +511,11 @@ fn draw_single_block(
                     inner,
                 );
             } else {
-                let text = format!("[{}]\n{}", lang, content);
+                let text = if content.is_empty() {
+                    format!("[{}]", lang)
+                } else {
+                    format!("[{}] {}", lang, content)
+                };
                 f.render_widget(
                     Paragraph::new(zoomed_text(&text, zoom))
                         .style(Style::default().fg(FG_CODE).bg(bg))
@@ -968,11 +987,7 @@ fn font_zoom(app: &App) -> u16 {
 }
 
 fn zoomed_line_count(lines: u16, zoom: u16) -> u16 {
-    if lines == 0 {
-        1
-    } else {
-        lines + lines.saturating_sub(1) * zoom.saturating_sub(1)
-    }
+    lines.max(1).saturating_mul(zoom.max(1))
 }
 
 fn zoomed_text(content: &str, zoom: u16) -> String {
@@ -984,11 +999,11 @@ fn zoomed_text(content: &str, zoom: u16) -> String {
     for (idx, line) in content.lines().enumerate() {
         if idx > 0 {
             result.push('\n');
-            for _ in 0..zoom.saturating_sub(1) {
-                result.push('\n');
-            }
         }
         result.push_str(line);
+        for _ in 1..zoom {
+            result.push('\n');
+        }
     }
 
     if result.is_empty() {
@@ -1290,6 +1305,7 @@ fn draw_present_block(
     area: Rect,
     typography: PresentTypography,
 ) {
+    let zoom = font_zoom(app);
     match &block.kind {
         BlockKind::Heading { level } => {
             let marker = if is_selected { "▸ " } else { "  " };
@@ -1309,18 +1325,17 @@ fn draw_present_block(
                     .bg(BG_PRESENT)
                     .add_modifier(Modifier::BOLD)
             };
-            let mut lines: Vec<Line> = block
-                .content
-                .lines()
-                .enumerate()
-                .map(|(line_idx, line)| {
+            let mut lines: Vec<Line> = Vec::new();
+            for (line_idx, line) in block.content.lines().enumerate() {
+                lines.push({
                     let prefix = if line_idx == 0 { marker } else { "  " };
                     Line::from(vec![Span::styled(
                         format!("{}{}{}", indent, prefix, line),
                         style,
                     )])
-                })
-                .collect();
+                });
+                push_zoom_gap(&mut lines, zoom);
+            }
             if lines.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
                     format!("{}{}", indent, marker),
@@ -1361,6 +1376,7 @@ fn draw_present_block(
                         Style::default().fg(FG_SECONDARY).bg(BG_PRESENT),
                     ),
                 ]));
+                push_zoom_gap(&mut lines, zoom);
             }
             if lines.is_empty() {
                 let marker = if is_selected { "▸ " } else { "  " };
@@ -1381,8 +1397,7 @@ fn draw_present_block(
             );
         }
         BlockKind::Code { lang } => {
-            let lines: Vec<Line> = block
-                .content
+            let lines: Vec<Line> = zoomed_text(&block.content, zoom)
                 .lines()
                 .map(|line| {
                     Line::from(vec![Span::styled(
@@ -1431,6 +1446,7 @@ fn draw_present_block(
                         Style::default().fg(FG_CODE).bg(BG_PRESENT_PANEL),
                     ),
                 ]));
+                push_zoom_gap(&mut lines, zoom);
             }
             if lines.is_empty() {
                 lines.push(Line::from(vec![Span::styled(
@@ -1454,11 +1470,12 @@ fn draw_present_block(
         BlockKind::OutputPlaceholder => {
             let max_lines = present_output_max_lines(app, idx, typography);
             let output_lines = present_output_lines(app, idx, block, max_lines);
-            let lines: Vec<Line> = output_lines
-                .into_iter()
+            let output_text = zoomed_text(&output_lines.join("\n"), zoom);
+            let lines: Vec<Line> = output_text
+                .lines()
                 .map(|line| {
                     Line::from(vec![Span::styled(
-                        line,
+                        line.to_string(),
                         Style::default()
                             .fg(Color::Rgb(170, 210, 170))
                             .bg(BG_PRESENT_PANEL),
