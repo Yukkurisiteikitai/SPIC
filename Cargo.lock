@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "slidecli"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "crossterm 0.26.0",
