@@ -25,7 +25,9 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
     if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
             KeyCode::Char('s') => {
-                app.set_status("保存しました（未実装）");
+                match app.save_current_file() {
+                    Ok(msg) | Err(msg) => app.set_status(msg),
+                }
                 return Action::None;
             }
             KeyCode::Char('q') => {
@@ -37,12 +39,12 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
         }
     }
 
-    match key.code {
-        KeyCode::Char('q') => return Action::Quit,
+        match key.code {
+            KeyCode::Char('q') => return Action::Quit,
 
         // スライドナビ
         KeyCode::Char('h') | KeyCode::Left => app.prev_slide(),
-        KeyCode::Char('l') | KeyCode::Right => app.next_slide(),
+        KeyCode::Char('l') | KeyCode::Right => app.present_forward(),
 
         // ブロックナビ
         KeyCode::Char('k') | KeyCode::Up => app.prev_block(),
@@ -274,12 +276,12 @@ fn handle_present(app: &mut App, key: KeyEvent) -> Action {
             if app.is_exec_selected() {
                 app.try_present_exec_selected();
             } else {
-                app.next_slide();
+                app.present_forward();
             }
         }
 
         // 前スライド
-        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => app.prev_slide(),
+        KeyCode::Char('h') | KeyCode::Left | KeyCode::Backspace => app.present_backward(),
 
         // ブロック選択
         KeyCode::Char('k') | KeyCode::Up => app.prev_block(),

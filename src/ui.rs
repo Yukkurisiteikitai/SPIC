@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use crate::app::{AccentColor, App, AppMode, ExecStatus, UiTheme};
+use crate::markdown;
 use crate::model::BlockKind;
 
 // ── カラーパレット（モックのダークテーマに合わせる）─────────────
@@ -100,8 +101,15 @@ pub fn draw(f: &mut Frame<'_>, app: &App) {
 // ── タイトルバー ─────────────────────────────────────────────────
 fn draw_titlebar(f: &mut Frame<'_>, app: &App, area: Rect) {
     let pres = &app.presentation;
+    let file_label = app
+        .current_file
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "demo.md".to_string());
     let title = format!(
-        " slidecli  —  demo.md [{}/{}]  {}",
+        " slidecli  —  {} [{}/{}]  {}",
+        file_label,
         app.current_slide + 1,
         app.slide_count(),
         pres.font_name,
@@ -1225,7 +1233,7 @@ pub fn draw_present(f: &mut Frame<'_>, app: &App) {
         let height =
             present_block_height(app, block, idx, content_area.width, typography).min(remaining);
         if height == 0 {
-            break;
+            continue;
         }
 
         let block_area = Rect {
@@ -1267,13 +1275,17 @@ fn present_block_height(
             }
         }
         BlockKind::Text => {
+            let visible = present_visible_text(app, block);
+            if visible.is_empty() {
+                return 0;
+            }
             let content_width = width.saturating_sub(typography.body_indent + 2).max(1);
             let extra = if typography.scale == PresentTextScale::Relaxed {
                 1
             } else {
                 0
             };
-            zoomed_line_count(wrapped_line_count(&block.content, content_width), zoom) + extra
+            zoomed_line_count(wrapped_line_count(&visible, content_width), zoom) + extra
         }
         BlockKind::Code { .. } => {
             let content_width = width.saturating_sub(4).max(1);
@@ -1360,9 +1372,13 @@ fn draw_present_block(
             );
         }
         BlockKind::Text => {
+            let visible = present_visible_text(app, block);
+            if visible.is_empty() {
+                return;
+            }
             let mut lines: Vec<Line> = Vec::new();
             let indent = spaces(typography.body_indent);
-            for (line_idx, line) in block.content.lines().enumerate() {
+            for (line_idx, line) in visible.lines().enumerate() {
                 let marker = if is_selected && line_idx == 0 {
                     "▸ "
                 } else {
@@ -1661,7 +1677,7 @@ fn draw_present_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
         page_area,
     );
 
-    let hint = " j/k 選択  Space/Enter 実行/次  h/l 前後  c キャンセル  Esc 終了";
+    let hint = " j/k 選択  Space/Enter 段階表示/実行  h/l 前後  c キャンセル  Esc 終了";
     let hint_width = area.width.saturating_sub(page_area.width + 1);
     let hint_area = Rect {
         x: area.x,
@@ -1674,6 +1690,24 @@ fn draw_present_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
             .style(Style::default().fg(Color::Rgb(78, 78, 78)).bg(BG_PRESENT)),
         hint_area,
     );
+}
+
+fn present_visible_text(app: &App, block: &crate::model::Block) -> String {
+    let mut consumed = 0usize;
+    for slide_block in &app.current_slide().blocks {
+        if !matches!(slide_block.kind, BlockKind::Text) {
+            continue;
+        }
+
+        let marker_count = markdown::reveal_marker_count(&slide_block.content);
+        let local_step = app.present_reveal_step.saturating_sub(consumed).min(marker_count);
+        if slide_block.id == block.id {
+            return markdown::visible_reveal_content(&slide_block.content, local_step);
+        }
+        consumed += marker_count;
+    }
+
+    block.content.clone()
 }
 
 // ── exec実行確認ダイアログ ───────────────────────────────────

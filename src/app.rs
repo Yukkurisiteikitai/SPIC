@@ -1,9 +1,12 @@
+use std::fs;
 use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Instant;
 
+use crate::markdown;
 use crate::model::{Block, BlockKind, Presentation};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -124,6 +127,8 @@ pub struct RunningExec {
 
 pub struct App {
     pub presentation: Presentation,
+    pub current_file: Option<PathBuf>,
+    pub present_reveal_step: usize,
     pub current_slide: usize,
     pub selected_block: Option<usize>,
     pub mode: AppMode,
@@ -142,19 +147,21 @@ pub struct App {
 
 impl App {
     pub fn new(presentation: Presentation) -> Self {
-        let next_id = presentation
-            .slides
-            .iter()
-            .flat_map(|s| s.blocks.iter())
-            .map(|b| b.id)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        Self::with_file(presentation, None)
+    }
 
+    pub fn with_file(presentation: Presentation, current_file: Option<PathBuf>) -> Self {
+        let next_id = Self::next_block_id_for(&presentation);
+        let selected_block = presentation
+            .slides
+            .first()
+            .and_then(|slide| if slide.blocks.is_empty() { None } else { Some(0) });
         Self {
             presentation,
+            current_file,
+            present_reveal_step: 0,
             current_slide: 0,
-            selected_block: Some(0),
+            selected_block,
             mode: AppMode::Normal,
             edit_buffer: String::new(),
             edit_cursor: 0,
@@ -168,6 +175,17 @@ impl App {
             ui_theme: UiTheme::Dark,
             accent_color: AccentColor::Blue,
         }
+    }
+
+    fn next_block_id_for(presentation: &Presentation) -> u64 {
+        presentation
+            .slides
+            .iter()
+            .flat_map(|s| s.blocks.iter())
+            .map(|b| b.id)
+            .max()
+            .unwrap_or(0)
+            + 1
     }
 
     pub fn current_slide(&self) -> &crate::model::Slide {
@@ -205,6 +223,7 @@ impl App {
     pub fn prev_slide(&mut self) {
         if self.current_slide > 0 {
             self.current_slide -= 1;
+            self.present_reveal_step = 0;
             let len = self.current_slide().blocks.len();
             self.selected_block = if len == 0 { None } else { Some(0) };
         }
@@ -213,6 +232,7 @@ impl App {
     pub fn next_slide(&mut self) {
         if self.current_slide + 1 < self.presentation.slides.len() {
             self.current_slide += 1;
+            self.present_reveal_step = 0;
             let len = self.current_slide().blocks.len();
             self.selected_block = if len == 0 { None } else { Some(0) };
         }
@@ -221,6 +241,7 @@ impl App {
     pub fn go_to_slide(&mut self, idx: usize) {
         if idx < self.presentation.slides.len() {
             self.current_slide = idx;
+            self.present_reveal_step = 0;
             let len = self.current_slide().blocks.len();
             self.selected_block = if len == 0 { None } else { Some(0) };
         }
@@ -675,11 +696,41 @@ impl App {
 
     pub fn enter_present(&mut self) {
         self.go_to_slide(0);
+        self.present_reveal_step = 0;
         self.mode = AppMode::Present;
     }
 
     pub fn exit_present(&mut self) {
+        self.present_reveal_step = 0;
         self.mode = AppMode::Normal;
+    }
+
+    pub fn current_slide_reveal_count(&self) -> usize {
+        self.current_slide()
+            .blocks
+            .iter()
+            .filter(|block| matches!(block.kind, BlockKind::Text))
+            .map(|block| markdown::reveal_marker_count(&block.content))
+            .sum()
+    }
+
+    pub fn present_forward(&mut self) {
+        if self.present_reveal_step < self.current_slide_reveal_count() {
+            self.present_reveal_step += 1;
+        } else {
+            self.next_slide();
+        }
+    }
+
+    pub fn present_backward(&mut self) {
+        if self.present_reveal_step > 0 {
+            self.present_reveal_step -= 1;
+        } else if self.current_slide > 0 {
+            self.current_slide -= 1;
+            self.present_reveal_step = self.current_slide_reveal_count();
+            let len = self.current_slide().blocks.len();
+            self.selected_block = if len == 0 { None } else { Some(0) };
+        }
     }
 
     // ── 設定・コマンド ───────────────────────────────
@@ -776,6 +827,19 @@ impl App {
         let value = parts.collect::<Vec<_>>().join(" ");
 
         match command {
+            "w" | "write" | "save" => {
+                if value.is_empty() {
+                    self.save_current_file()
+                } else {
+                    self.save_to_path(PathBuf::from(value))
+                }
+            }
+            "o" | "open" | "edit" => {
+                if value.is_empty() {
+                    return Err("open する Markdown ファイルを指定してください".to_string());
+                }
+                self.open_path(PathBuf::from(value))
+            }
             "font-size" | "fontsize" => {
                 let size = value
                     .parse::<u8>()
@@ -852,6 +916,63 @@ impl App {
     pub fn cycle_accent(&mut self) {
         self.accent_color = self.accent_color.next();
         self.set_status(format!("accent: {}", self.accent_color.label()));
+    }
+
+    pub fn save_current_file(&mut self) -> Result<String, String> {
+        let Some(path) = self.current_file.clone() else {
+            return Err("保存先がありません。:write path/to/file.md を使ってください".to_string());
+        };
+        self.save_to_path(path)
+    }
+
+    pub fn save_to_path(&mut self, path: impl AsRef<Path>) -> Result<String, String> {
+        let path = path.as_ref();
+        let serialized = markdown::serialize(&self.presentation);
+        fs::write(path, serialized)
+            .map_err(|err| format!("保存に失敗しました: {} ({})", path.display(), err))?;
+        self.current_file = Some(path.to_path_buf());
+        Ok(format!("保存しました: {}", path.display()))
+    }
+
+    pub fn open_path(&mut self, path: impl AsRef<Path>) -> Result<String, String> {
+        let path = path.as_ref();
+        let presentation = if path.exists() {
+            let source = fs::read_to_string(path)
+                .map_err(|err| format!("読み込みに失敗しました: {} ({})", path.display(), err))?;
+            markdown::deserialize(&source)
+                .map_err(|err| format!("Markdown の解析に失敗しました: {}", err))?
+        } else {
+            Presentation::blank()
+        };
+
+        if matches!(
+            self.running_exec.as_ref().map(|r| r.status),
+            Some(ExecStatus::Running)
+        ) {
+            self.cancel_running_exec();
+        }
+
+        self.presentation = presentation;
+        self.current_file = Some(path.to_path_buf());
+        self.current_slide = 0;
+        self.present_reveal_step = 0;
+        self.selected_block = self
+            .presentation
+            .slides
+            .first()
+            .and_then(|slide| if slide.blocks.is_empty() { None } else { Some(0) });
+        self.edit_buffer.clear();
+        self.edit_cursor = 0;
+        self.command_buffer.clear();
+        self.command_cursor = 0;
+        self.running_exec = None;
+        self.next_block_id = Self::next_block_id_for(&self.presentation);
+
+        if path.exists() {
+            Ok(format!("開きました: {}", path.display()))
+        } else {
+            Ok(format!("新規ファイルを作成します: {}", path.display()))
+        }
     }
 
     // ── ユーティリティ ───────────────────────────────

@@ -10,7 +10,7 @@ pub enum BlockKind {
     Separator,                // スライド内区切り
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Block {
     pub id: u64,
     pub kind: BlockKind,
@@ -44,7 +44,7 @@ impl Block {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Slide {
     pub title: String,       // サイドバー表示用
     pub blocks: Vec<Block>,
@@ -64,7 +64,7 @@ impl Slide {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Presentation {
     pub slides: Vec<Slide>,
     pub font_name: String,
@@ -72,6 +72,14 @@ pub struct Presentation {
 }
 
 impl Presentation {
+    pub fn blank() -> Self {
+        Self {
+            slides: vec![Slide::new("Slide 1")],
+            font_name: "JetBrains Mono".to_string(),
+            font_size: 14,
+        }
+    }
+
     pub fn demo() -> Self {
         let mut p = Self {
             slides: Vec::new(),
