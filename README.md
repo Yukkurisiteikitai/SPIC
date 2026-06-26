@@ -6,6 +6,7 @@
 
 ```bash
 brew tap Yukkurisiteikitai/spic
+brew trust yukkurisiteikitai/spic
 brew install slidecli
 ```
 
