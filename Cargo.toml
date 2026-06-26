@@ -3,6 +3,11 @@ name = "slidecli"
 version = "0.1.0"
 edition = "2021"
 default-run = "slidecli"
+description = "Terminal slide editor and presenter"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Yukkurisiteikitai/SPIC"
+homepage = "https://github.com/Yukkurisiteikitai/SPIC"
 
 [[bin]]
 name = "slidecli"

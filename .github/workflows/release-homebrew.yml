@@ -1,0 +1,195 @@
+name: release-homebrew
+
+on:
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+jobs:
+  validate-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release_meta.outputs.version }}
+      tag: ${{ steps.release_meta.outputs.tag }}
+      homepage: ${{ steps.release_meta.outputs.homepage }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - id: release_meta
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$version" ]; then
+            echo "Failed to read package.version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          expected_tag="v$version"
+          if [ "$RELEASE_TAG" != "$expected_tag" ]; then
+            echo "Release tag $RELEASE_TAG does not match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+          {
+            echo "version=$version"
+            echo "tag=$RELEASE_TAG"
+            echo "homepage=https://github.com/$REPOSITORY"
+          } >>"$GITHUB_OUTPUT"
+
+  build-macos-release:
+    needs: validate-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    env:
+      RELEASE_TAG: ${{ needs.validate-release.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.validate-release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Ensure Rust toolchain
+        run: |
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable
+            export PATH="$HOME/.cargo/bin:$PATH"
+            echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+          fi
+
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "${{ matrix.target }}"
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --locked --release --bin slidecli
+
+      - name: Package release asset
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive_name="slidecli-v${RELEASE_VERSION}-${TARGET}.tar.gz"
+          staging_dir="$(mktemp -d)"
+          trap 'rm -rf "$staging_dir"' EXIT
+
+          cp "target/release/slidecli" "$staging_dir/slidecli"
+          cp LICENSE "$staging_dir/LICENSE"
+          tar -C "$staging_dir" -czf "$archive_name" slidecli LICENSE
+
+          sha256="$(shasum -a 256 "$archive_name" | awk '{print $1}')"
+          asset_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${archive_name}"
+
+          {
+            echo "ARCHIVE_NAME=$archive_name"
+            echo "TARGET=$TARGET"
+            echo "URL=$asset_url"
+            echo "SHA256=$sha256"
+          } >"homebrew-${TARGET}.env"
+
+      - name: Upload release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" "slidecli-v${RELEASE_VERSION}-${{ matrix.target }}.tar.gz" --clobber
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-metadata-${{ matrix.target }}
+          path: homebrew-${{ matrix.target }}.env
+
+  update-homebrew-tap:
+    needs:
+      - validate-release
+      - build-macos-release
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ needs.validate-release.outputs.version }}
+      HOMEPAGE: ${{ needs.validate-release.outputs.homepage }}
+      TAP_REPOSITORY: Yukkurisiteikitai/homebrew-spic
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: homebrew-metadata
+          pattern: homebrew-metadata-*
+          merge-multiple: true
+
+      - name: Check tap token
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not configured" >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TAP_REPOSITORY }}
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-spic
+          ref: main
+
+      - name: Render formula
+        run: |
+          arm_file="homebrew-metadata/homebrew-aarch64-apple-darwin.env"
+          x86_file="homebrew-metadata/homebrew-x86_64-apple-darwin.env"
+
+          if [ ! -f "$arm_file" ] || [ ! -f "$x86_file" ]; then
+            echo "Missing Homebrew metadata artifacts" >&2
+            exit 1
+          fi
+
+          set -a
+          . "$arm_file"
+          set +a
+          arm_url="$URL"
+          arm_sha256="$SHA256"
+
+          set -a
+          . "$x86_file"
+          set +a
+          x86_url="$URL"
+          x86_sha256="$SHA256"
+
+          scripts/render-homebrew-formula.sh \
+            "homebrew-spic/Formula/slidecli.rb" \
+            "$RELEASE_VERSION" \
+            "$arm_url" \
+            "$arm_sha256" \
+            "$x86_url" \
+            "$x86_sha256" \
+            "$HOMEPAGE"
+
+      - name: Commit and push formula update
+        working-directory: homebrew-spic
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ -z "$(git status --short -- Formula/slidecli.rb)" ]; then
+            echo "Formula is already up to date"
+            exit 0
+          fi
+
+          git add Formula/slidecli.rb
+          git commit -m "slidecli ${RELEASE_VERSION}"
+          git push origin HEAD:main
